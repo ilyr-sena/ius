@@ -1,7 +1,9 @@
 import Foundation
-import ScreenCaptureKit
 import CoreMedia
 import CoreVideo
+
+#if canImport(ScreenCaptureKit)
+import ScreenCaptureKit
 
 final class CaptureProbe: NSObject, SCStreamDelegate, SCStreamOutput {
     private let q = DispatchQueue(label: "ius.capture")
@@ -22,7 +24,7 @@ final class CaptureProbe: NSObject, SCStreamDelegate, SCStreamOutput {
     }
 
     func inventory() -> [String: Any] {
-        guard #available(iOS 26.0, *) else { return ["available": false] }
+        guard #available(iOS 27.0, *) else { return ["available": false] }
         let sem = DispatchSemaphore(value: 0)
         var out: [String: Any] = [:]
         Task.detached {
@@ -42,7 +44,7 @@ final class CaptureProbe: NSObject, SCStreamDelegate, SCStreamOutput {
     }
 
     func startCapture(width: Int, height: Int) -> String? {
-        guard #available(iOS 26.0, *) else { return "SCK unavailable on this OS" }
+        guard #available(iOS 27.0, *) else { return "SCK unavailable on this OS" }
         let sem = DispatchSemaphore(value: 0)
         var errOut: String?
         Task.detached { [self] in
@@ -76,7 +78,7 @@ final class CaptureProbe: NSObject, SCStreamDelegate, SCStreamOutput {
     }
 
     func stopCapture() {
-        guard #available(iOS 26.0, *) else { return }
+        guard #available(iOS 27.0, *) else { return }
         lock.lock(); let s = stream; stream = nil; lock.unlock()
         let sem = DispatchSemaphore(value: 0)
         Task.detached {
@@ -125,3 +127,35 @@ final class CaptureProbe: NSObject, SCStreamDelegate, SCStreamOutput {
         lock.lock(); stopError = String(describing: error); lock.unlock()
     }
 }
+
+#else
+
+final class CaptureProbe: NSObject {
+    private let lock = NSLock()
+
+    func markBackgrounded() {}
+
+    func inventory() -> [String: Any] {
+        return [
+            "available": false,
+            "error": "ScreenCaptureKit module absent from this SDK — first ships for iOS 27 (Xcode 27)",
+        ]
+    }
+
+    func startCapture(width: Int, height: Int) -> String? {
+        return "ScreenCaptureKit unavailable: requires iOS 27+ SDK"
+    }
+
+    func stopCapture() {}
+
+    func stats() -> [String: Any] {
+        return [
+            "available": false,
+            "totalFrames": 0,
+            "foregroundFrames": 0,
+            "backgroundFrames": 0,
+        ]
+    }
+}
+
+#endif
