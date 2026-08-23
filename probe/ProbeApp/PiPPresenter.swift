@@ -71,10 +71,9 @@ final class PiPPresenter: NSObject {
     private var pip: AVPictureInPictureController?
     private(set) var lastError: String?
 
-    /// Starts inline looping playback with automatic PiP on leave-foreground.
-    /// Safe to call repeatedly; only acts once.
-    func ensureStarted() -> Bool {
-        if player != nil { return true }
+    /// Creates the looping clip and starts INLINE playback (no PiP yet).
+    func prepareInline() -> Bool {
+        guard player == nil else { return true }
         do {
             let url = FileManager.default.temporaryDirectory.appendingPathComponent("ius-loop.mp4")
             if !FileManager.default.fileExists(atPath: url.path) {
@@ -87,6 +86,7 @@ final class PiPPresenter: NSObject {
             try AVAudioSession.sharedInstance().setCategory(.playback)
             try AVAudioSession.sharedInstance().setActive(true)
 
+            var ok = false
             DispatchQueue.main.sync {
                 let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
                 guard let root = scenes.first?.windows.first(where: { $0.isKeyWindow })?.rootViewController?.view else {
@@ -98,15 +98,25 @@ final class PiPPresenter: NSObject {
                 l.backgroundColor = UIColor.black.cgColor
                 root.layer.addSublayer(l)
                 let pc = AVPictureInPictureController(playerLayer: l)
-                pc?.canStartPictureInPictureAutomaticallyFromInline = true
+                // Deliberately NOT enabling automatic-PiP here: it would enter PiP
+                // immediately and background the app before capture even starts.
                 self.pip = pc
                 p.play()
                 self.player = p
+                ok = true
             }
-            return player != nil
+            return ok
         } catch {
             lastError = String(describing: error)
             return false
+        }
+    }
+
+    /// Called right before the user should swipe home: shrink to a floating PiP window.
+    func armForBackground() {
+        DispatchQueue.main.sync {
+            pip?.canStartPictureInPictureAutomaticallyFromInline = true
+            pip?.startPiP()
         }
     }
 

@@ -20,7 +20,7 @@ struct ProbeStatusView: View {
                 .font(.headline)
             Text("phase: \(phase)")
                 .font(.subheadline.monospaced())
-            Text("Drive over USB:\npython3 tools/probe_run.py\n\nA small looping video plays below the status — when you swipe to home it becomes a PiP window (keep it visible).\nSwipe home at awaiting-background.")
+            Text("Drive over USB:\npython3 tools/probe_run.py\n\nA small looping video appears below the status. At awaiting-background it pops out as a floating PiP window — then swipe home, keep the window visible, don't lock.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
