@@ -32,10 +32,10 @@ jobs:
         working-directory: probe
         run: xcodegen generate
 
-      - name: Build for testing (unsigned)
+      - name: Build (unsigned)
         working-directory: probe
         run: |
-          xcodebuild build-for-testing \
+          xcodebuild build \
             -project IUSProbe.xcodeproj \
             -scheme IUSProbe \
             -destination 'generic/platform=iOS' \
@@ -46,13 +46,13 @@ jobs:
       - name: Package unsigned IPA
         working-directory: probe
         run: |
-          APP=$(find build/Build/Products/Debug-iphoneos -maxdepth 1 -name '*Runner.app' | head -1)
-          echo "runner app: $APP"
+          APP=$(find build/Build/Products/Debug-iphoneos -maxdepth 1 -name '*.app' | head -1)
+          echo "app: $APP"
           mkdir -p Payload
           cp -R "$APP" Payload/
-          zip -qry IUSProbeRunner-unsigned.ipa Payload
+          zip -qry IUSProbe-unsigned.ipa Payload
 
       - uses: actions/upload-artifact@v4
         with:
-          name: IUSProbeRunner-unsigned-ipa
-          path: probe/IUSProbeRunner-unsigned.ipa
+          name: IUSProbe-unsigned-ipa
+          path: probe/IUSProbe-unsigned.ipa

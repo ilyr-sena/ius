@@ -21,31 +21,13 @@ targets:
     info:
       path: ProbeApp/Info.plist
       properties:
-        CFBundleDisplayName: IUSProbeTarget
+        CFBundleDisplayName: IUSProbe
         UILaunchScreen: {}
-
-  IUSProbeUITests:
-    type: bundle.ui-testing
-    platform: iOS
-    sources: [ProbeUITests]
-    dependencies:
-      - target: ProbeApp
-    settings:
-      base:
-        PRODUCT_BUNDLE_IDENTIFIER: dev.ius.probe.uitests
-        TEST_TARGET_NAME: ProbeApp
-    info:
-      path: ProbeUITests/Info.plist
-      properties:
-        CFBundleDisplayName: IUSProbeUITests
         UIBackgroundModes: [screen-capture]
+        NSLocalNetworkUsageDescription: The probe serves its status over a local HTTP port.
 
 schemes:
   IUSProbe:
     build:
       targets:
         ProbeApp: all
-        IUSProbeUITests: all
-    test:
-      gatherCoverageData: false
-      targets: [IUSProbeUITests]

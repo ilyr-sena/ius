@@ -1,6 +1,5 @@
 import Foundation
 import UIKit
-import XCTest
 
 final class ProbeOrchestrator {
     static let shared = ProbeOrchestrator()
@@ -12,8 +11,16 @@ final class ProbeOrchestrator {
     private var report: [String: Any] = [:]
     private var running = false
     private var backgrounded = false
+    private var started = false
+
+    func currentPhase() -> String {
+        lock.lock(); defer { lock.unlock() }
+        return phase
+    }
 
     func start(port: UInt16) {
+        guard !started else { return }
+        started = true
         server.handler = { [weak self] method, path in
             guard let self else { return (503, ["error": "gone"]) }
             return self.route(method: method, path: path)
@@ -39,8 +46,7 @@ final class ProbeOrchestrator {
     private func route(method: String, path: String) -> (Int, [String: Any]) {
         switch (method, path) {
         case ("GET", "/status"):
-            lock.lock(); let p = phase; lock.unlock()
-            return (200, ["phase": p])
+            return (200, ["phase": currentPhase()])
         case ("POST", "/probe/start"):
             lock.lock()
             if running { lock.unlock(); return (409, ["error": "already running"]) }
@@ -71,6 +77,7 @@ final class ProbeOrchestrator {
         let h = d["height"] as? Int ?? 2532
 
         setPhase("start-capture")
+        print("[ius] a system screen-sharing picker will appear — select the full display")
         if let err = capture.startCapture(width: w, height: h) {
             lock.lock()
             report["captureStartError"] = err
@@ -89,15 +96,9 @@ final class ProbeOrchestrator {
         lock.lock(); report["foregroundFps"] = fgFps; lock.unlock()
 
         setPhase("awaiting-background")
-        DispatchQueue.main.async { [self] in
-            XCUIDevice.shared.press(.home)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [self] in
-                lock.lock(); let bg = backgrounded; lock.unlock()
-                if !bg { XCUIApplication(bundleIdentifier: "com.apple.Preferences").launch() }
-            }
-        }
+        print("[ius] SWIPE UP to the home screen now (keep device unlocked, screen on)")
         var bg = false
-        for _ in 0..<30 {
+        for _ in 0..<60 {
             Thread.sleep(forTimeInterval: 0.5)
             lock.lock(); bg = backgrounded; lock.unlock()
             if bg { break }
