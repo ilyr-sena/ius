@@ -51,7 +51,7 @@ final class MJPEGStreamer {
     private var clients: [Client] = []
     private var converting = false
     private var lastSent: [String: DispatchTime] = [:]
-    private var lastConfig = StreamConfig.loadPersisted()
+    private var lastConfig = MJPEGStreamer.loadPersisted()
     private let ciContext = CIContext()
 
     var hasViewers: Bool {
