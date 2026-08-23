@@ -32,22 +32,22 @@ final class EncoderProbe {
 
         var session: VTCompressionSession?
         let hwSpec = [kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder: true] as CFDictionary
-        var status = VTCompressionSessionCreate(allocator: nil, width: width, height: height,
+        var status = VTCompressionSessionCreate(allocator: nil, width: Int32(width), height: Int32(height),
                                                 codecType: kCMVideoCodecType_H264,
                                                 encoderSpecification: hwSpec,
                                                 imageBufferAttributes: nil,
                                                 compressedDataAllocator: nil,
-                                                outputCallback: cb, refCon: refCon,
+                                                outputCallback: cb, refcon: refCon,
                                                 compressionSessionOut: &session)
         report["hw"] = status == noErr ? "required" : "fallback"
         if status != noErr {
             let swSpec = [kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder: true] as CFDictionary
-            status = VTCompressionSessionCreate(allocator: nil, width: width, height: height,
+            status = VTCompressionSessionCreate(allocator: nil, width: Int32(width), height: Int32(height),
                                                 codecType: kCMVideoCodecType_H264,
                                                 encoderSpecification: swSpec,
                                                 imageBufferAttributes: nil,
                                                 compressedDataAllocator: nil,
-                                                outputCallback: cb, refCon: refCon,
+                                                outputCallback: cb, refcon: refCon,
                                                 compressionSessionOut: &session)
         }
         guard status == noErr, let s = session else {
@@ -55,12 +55,12 @@ final class EncoderProbe {
             return report
         }
 
-        VTSessionSetProperty(s, kVTCompressionPropertyKey_RealTime, true as CFBoolean)
-        VTSessionSetProperty(s, kVTCompressionPropertyKey_AverageBitRate, 12_000_000 as CFNumber)
-        VTSessionSetProperty(s, kVTCompressionPropertyKey_ExpectedFrameRate, 60 as CFNumber)
-        VTSessionSetProperty(s, kVTCompressionPropertyKey_MaxKeyFrameInterval, 60 as CFNumber)
-        VTSessionSetProperty(s, kVTCompressionPropertyKey_ProfileLevel, kVTProfileLevel_H264_High_AutoLevel)
-        VTSessionSetProperty(s, kVTCompressionPropertyKey_AllowFrameReordering, false as CFBoolean)
+        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_RealTime, value: true as CFBoolean)
+        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_AverageBitRate, value: 12_000_000 as CFNumber)
+        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: 60 as CFNumber)
+        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: 60 as CFNumber)
+        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_ProfileLevel, value: kVTProfileLevel_H264_High_AutoLevel)
+        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_AllowFrameReordering, value: false as CFBoolean)
         VTSessionPrepareToEncodeFrames(s)
 
         var pool: CVPixelBufferPool?
