@@ -61,8 +61,7 @@ final class MJPEGStreamer {
         DispatchQueue(label: "ius.mjpeg", target: .global()).async { [weak self, weak conn] in
             guard let conn else { return }
             while true {
-                let state = conn.state
-                if state == .cancelled || state == .failed || state != .ready { break }
+                guard conn.state == .ready else { break }
                 if let d = self?.current() {
                     var payload = Data("--iusframe\r\nContent-Type: image/jpeg\r\nContent-Length: \(d.count)\r\n\r\n".utf8)
                     payload.append(d)
