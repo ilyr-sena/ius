@@ -29,6 +29,15 @@ final class ProbeOrchestrator {
         server.streamHandler = { conn, path in
             MJPEGStreamer.shared.serve(conn, path: path)
         }
+        server.rawHandler = { _, path in
+            if path == "/stream.html" {
+                return (200, "text/html", Data(H264Stream.playerHTML.utf8))
+            }
+            return nil
+        }
+        server.webSocketHandler = { conn, _ in
+            H264Stream.shared.addWebSocket(conn)
+        }
         NotificationCenter.default.addObserver(
             forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: nil
         ) { [weak self] _ in

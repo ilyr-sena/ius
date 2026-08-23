@@ -180,6 +180,7 @@ final class CaptureProbe: NSObject, SCStreamDelegate, SCStreamOutput, SCContentS
         }
         lastFrameAt = now
         MJPEGStreamer.shared.publish(sampleBuffer: sampleBuffer)
+        H264Stream.shared.push(sampleBuffer: sampleBuffer)
         if backgrounded { backgroundFrames += 1 } else { foregroundFrames += 1 }
     }
 
