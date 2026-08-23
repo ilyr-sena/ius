@@ -110,5 +110,5 @@ final class PiPPresenter: NSObject {
         }
     }
 
-    func isActive() -> Bool { player != nil && player?.timeControlStatus != .stopped }
+    func isActive() -> Bool { player?.timeControlStatus == .playing }
 }
