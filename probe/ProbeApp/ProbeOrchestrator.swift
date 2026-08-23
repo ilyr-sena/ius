@@ -63,6 +63,12 @@ final class ProbeOrchestrator {
     }
 
     private func runPlan() {
+        setPhase("pip")
+        DispatchQueue.main.sync { _ = PiPPresenter.shared.ensureStarted() }
+        lock.lock()
+        report["pip"] = PiPPresenter.shared.isActive() ? "playing" : ("failed: \(PiPPresenter.shared.lastError ?? "?")")
+        lock.unlock()
+
         setPhase("inventory")
         let inv = capture.inventory()
         lock.lock(); report["inventory"] = inv; lock.unlock()
