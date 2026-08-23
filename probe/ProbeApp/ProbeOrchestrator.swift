@@ -12,6 +12,25 @@ final class ProbeOrchestrator {
     private var running = false
     private var backgrounded = false
     private var started = false
+    private var capturingOnly = false
+
+    func startCaptureOnly() {
+        guard !capturingOnly else { return }
+        capturingOnly = true
+        let inv = capture.inventory()
+        guard let displays = inv["displays"] as? [[String: Any]],
+              let d = displays.first else {
+            capturingOnly = false
+            return
+        }
+        let w = d["width"] as? Int ?? 1170
+        let h = d["height"] as? Int ?? 2532
+        print("[ius] standalone capture start \(w)x\(h)")
+        if let err = capture.startCapture(width: w, height: h) {
+            print("[ius] standalone capture FAILED: \(err)")
+            capturingOnly = false
+        }
+    }
 
     func currentPhase() -> String {
         lock.lock(); defer { lock.unlock() }
@@ -66,6 +85,17 @@ final class ProbeOrchestrator {
             lock.unlock()
             DispatchQueue.global(qos: .utility).async { [self] in runPlan() }
             return (200, ["started": true])
+        case ("POST", "/capture/start"):
+            DispatchQueue.global(qos: .utility).async { [weak self] in
+                self?.startCaptureOnly()
+            }
+            return (200, ["started": true])
+        case ("POST", "/capture/stop"):
+            capture.stopCapture()
+            capturingOnly = false
+            return (200, ["stopped": true])
+        case ("GET", "/capture/status"):
+            return (200, ["capturing": capturingOnly])
         case ("GET", "/probe/report"):
             lock.lock(); var out = report; out["phase"] = phase; lock.unlock()
             return (200, out)

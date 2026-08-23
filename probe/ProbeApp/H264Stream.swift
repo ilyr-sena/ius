@@ -395,9 +395,15 @@ let msb = null, sb = null, queue = [];
 function pump(){ if(!sb || sb.updating || !queue.length) return;
   const chunk = queue.shift();
   try { sb.appendBuffer(chunk); } catch(e) { console.warn(e); } }
+ws.onopen = () => { st.textContent = 'ws open - waiting for keyframe'; };
+ws.onerror = (ev) => { st.textContent = 'ws error'; console.log(ev); };
+ws.onclose = () => { st.textContent = 'disconnected'; };
+let gotCodec = false, bytesIn = 0;
 ws.onmessage = (e) => {
   if (typeof e.data === 'string') {
     const j = JSON.parse(e.data);
+    gotCodec = true;
+    st.textContent = 'codec ' + j.codec + ' - opening MSE';
     msb = new MediaSource();
     v.src = URL.createObjectURL(msb);
     msb.addEventListener('sourceopen', () => {
@@ -415,8 +421,15 @@ ws.onmessage = (e) => {
       queue = []; pump();
     });
   } else {
-    if (!sb || sb.updating) { if (queue.length < 240) queue.push(e.data); }
-    else { try { sb.appendBuffer(new Uint8Array(e.data)); } catch(err){} }
+    bytesIn += e.data.byteLength;
+    if (!gotCodec) { st.textContent = 'frames before codec?!'; }
+    else if (!msb) { st.textContent = 'waiting sourceopen'; }
+    if (!sb || sb.updating || queue.length) {
+      if (queue.length < 240) { queue.push(e.data); st.textContent = 'queue=' + queue.length; }
+    } else {
+      try { sb.appendBuffer(new Uint8Array(e.data)); }
+      catch(err) { st.textContent = 'append err: ' + err; console.warn(err); }
+    }
   }
 };
 ws.onclose = () => { st.textContent = 'disconnected'; };
