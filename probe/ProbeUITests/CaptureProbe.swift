@@ -1,11 +1,14 @@
 import Foundation
+import UIKit
 import CoreMedia
 import CoreVideo
 
 #if canImport(ScreenCaptureKit)
 import ScreenCaptureKit
 
-final class CaptureProbe: NSObject, SCStreamDelegate, SCStreamOutput {
+final class CaptureProbe: NSObject, SCStreamDelegate, SCStreamOutput, SCContentSharingPickerObserver {
+    static let pickerTimeoutSeconds: Int = 120
+
     private let q = DispatchQueue(label: "ius.capture")
     private let lock = NSLock()
     private var stream: SCStream?
@@ -19,27 +22,21 @@ final class CaptureProbe: NSObject, SCStreamDelegate, SCStreamOutput {
     private var intervals: [Double] = []
     private var stopError: String?
 
+    private let filterSem = DispatchSemaphore(value: 0)
+    private var pendingFilter: SCContentFilter?
+    private var pickerError: String?
+
     func markBackgrounded() {
         lock.lock(); backgrounded = true; lock.unlock()
     }
 
     func inventory() -> [String: Any] {
-        let sem = DispatchSemaphore(value: 0)
-        var out: [String: Any] = [:]
-        Task.detached {
-            do {
-                let content = try await SCShareableContent.current
-                out["displays"] = content.displays.map {
-                    ["width": $0.width, "height": $0.height, "id": Int($0.displayID)] as [String: Any]
-                }
-                out["appCount"] = content.applications.count
-            } catch {
-                out["error"] = String(describing: error)
-            }
-            sem.signal()
-        }
-        sem.wait()
-        return out
+        let b = UIScreen.main.nativeBounds
+        return [
+            "available": true,
+            "displays": [["width": Int(b.width), "height": Int(b.height), "id": 1]] as [[String: Any]],
+            "note": "iOS 27: filter is obtained via SCContentSharingPicker (no shareable-content enumeration)",
+        ]
     }
 
     func startCapture(width: Int, height: Int) -> String? {
@@ -47,25 +44,39 @@ final class CaptureProbe: NSObject, SCStreamDelegate, SCStreamOutput {
         var errOut: String?
         Task.detached { [self] in
             do {
-                let content = try await SCShareableContent.current
-                guard let display = content.displays.first else {
-                    throw NSError(domain: "ius", code: 1,
-                                  userInfo: [NSLocalizedDescriptionKey: "no displays in shareable content"])
+                let picker = SCContentSharingPicker.shared
+                var pcfg = SCContentSharingPickerConfiguration()
+                pcfg.allowedPickerModes = [.singleDisplay]
+                pcfg.allowsChangingSelectedContent = false
+                picker.defaultConfiguration = pcfg
+                picker.add(self)
+
+                lock.lock(); pendingFilter = nil; pickerError = nil; lock.unlock()
+                DispatchQueue.main.sync { picker.present() }
+                print("[ius] screen-sharing picker presented — select the full display (timeout \(Self.pickerTimeoutSeconds)s)")
+
+                if filterSem.wait(timeout: .now() + .init(Self.pickerTimeoutSeconds)) == .timedOut {
+                    throw NSError(domain: "ius", code: 2,
+                                  userInfo: [NSLocalizedDescriptionKey: "timed out waiting for picker selection"])
                 }
-                let filter = SCContentFilter(display: display,
-                                             excludingApplications: [],
-                                             exceptingWindows: [])
+                lock.lock(); let err = pickerError; let filter = pendingFilter; lock.unlock()
+                if let err { throw NSError(domain: "ius", code: 3,
+                                           userInfo: [NSLocalizedDescriptionKey: "picker failed: \(err)"]) }
+                guard let filter else {
+                    throw NSError(domain: "ius", code: 4,
+                                  userInfo: [NSLocalizedDescriptionKey: "no filter returned from picker"])
+                }
+
                 let cfg = SCStreamConfiguration()
                 cfg.width = width
                 cfg.height = height
-                cfg.minimumFrameInterval = CMTime(value: 1, timescale: 60)
-                cfg.queueDepth = 3
-                cfg.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+
                 let s = SCStream(filter: filter, configuration: cfg, delegate: self)
                 try s.addStreamOutput(self, type: .screen, sampleHandlerQueue: q)
                 lock.lock(); startedAt = DispatchTime.now(); lock.unlock()
                 try await s.startCapture()
                 lock.lock(); stream = s; lock.unlock()
+                print("[ius] capture started")
             } catch {
                 errOut = String(describing: error)
             }
@@ -78,8 +89,9 @@ final class CaptureProbe: NSObject, SCStreamDelegate, SCStreamOutput {
     func stopCapture() {
         lock.lock(); let s = stream; stream = nil; lock.unlock()
         let sem = DispatchSemaphore(value: 0)
-        Task.detached {
+        Task.detached { [self] in
             if let s { try? await s.stopCapture() }
+            SCContentSharingPicker.shared.remove(self)
             sem.signal()
         }
         _ = sem.wait(timeout: .now() + 5)
@@ -123,13 +135,28 @@ final class CaptureProbe: NSObject, SCStreamDelegate, SCStreamOutput {
     func stream(_ stream: SCStream, didStopWithError error: Error) {
         lock.lock(); stopError = String(describing: error); lock.unlock()
     }
+
+    // SCContentSharingPickerObserver
+    func contentSharingPicker(_ picker: SCContentSharingPicker, didUpdateWith newFilter: SCContentFilter,
+                              for stream: SCStream?) {
+        lock.lock(); pendingFilter = newFilter; lock.unlock()
+        filterSem.signal()
+    }
+
+    func contentSharingPicker(_ picker: SCContentSharingPicker, didCancelFor stream: SCStream?) {
+        lock.lock(); pickerError = "cancelled by user"; lock.unlock()
+        filterSem.signal()
+    }
+
+    func contentSharingPickerStartDidFailWithError(_ error: Error) {
+        lock.lock(); pickerError = String(describing: error); lock.unlock()
+        filterSem.signal()
+    }
 }
 
 #else
 
 final class CaptureProbe: NSObject {
-    private let lock = NSLock()
-
     func markBackgrounded() {}
 
     func inventory() -> [String: Any] {

@@ -38,6 +38,7 @@ targets:
       path: ProbeUITests/Info.plist
       properties:
         CFBundleDisplayName: IUSProbeUITests
+        UIBackgroundModes: [screen-capture]
 
 schemes:
   IUSProbe:
