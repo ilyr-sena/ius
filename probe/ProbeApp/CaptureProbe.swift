@@ -139,7 +139,7 @@ final class CaptureProbe: NSObject, SCStreamDelegate, SCStreamOutput, SCContentS
         guard let s else { return }
         let sem = DispatchSemaphore(value: 0)
         Task.detached { [self] in
-            if let s { try? await s.stopCapture() }
+            try? await s.stopCapture()
             sem.signal()
         }
         _ = sem.wait(timeout: .now() + 5)
