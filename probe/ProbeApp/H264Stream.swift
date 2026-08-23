@@ -39,28 +39,29 @@ private enum MP4 {
         let ftyp = box("ftyp", Data("iso5".utf8) + u32(0)
                               + Data("iso5".utf8) + Data("iso6".utf8) + Data("mp41".utf8))
 
-        let mvhd = fullbox("mvhd", 0, 0,
-            u32(0) + u32(0) +
-            u32(60000) + u32(0) +
-            u32(0x00010000) +
-            u16(0x0100) + u16(0) +
-            u32(0) + u32(0) +
-            unityMatrix +
-            u32(0) + u32(0) + u32(0) + u32(0) + u32(0) + u32(0) +
-            u32(2))
+        var mvhdBody = Data()
+        mvhdBody.append(u32(0)); mvhdBody.append(u32(0))
+        mvhdBody.append(u32(60000)); mvhdBody.append(u32(0))
+        mvhdBody.append(u32(0x00010000))
+        mvhdBody.append(u16(0x0100)); mvhdBody.append(u16(0))
+        mvhdBody.append(u32(0)); mvhdBody.append(u32(0))
+        mvhdBody.append(unityMatrix)
+        for _ in 0..<6 { mvhdBody.append(u32(0)) }
+        mvhdBody.append(u32(2))
+        let mvhd = fullbox("mvhd", 0, 0, mvhdBody)
 
-        let tkhd = fullbox("tkhd", 0, 0x0000007,
-            u32(0) + u32(0) +
-            u32(1) +
-            u32(0) +
-            u32(0) +
-            u32(0) + u32(0) +
-            u16(0) + u16(0) +
-            u16(0) +
-            u16(0) +
-            unityMatrix +
-            u32(UInt32(width) << 16) +
-            u32(UInt32(height) << 16))
+        var tkhdBody = Data()
+        tkhdBody.append(u32(0)); tkhdBody.append(u32(0))
+        tkhdBody.append(u32(1))
+        tkhdBody.append(u32(0))
+        tkhdBody.append(u32(0))
+        tkhdBody.append(u32(0)); tkhdBody.append(u32(0))
+        tkhdBody.append(u16(0)); tkhdBody.append(u16(0))
+        tkhdBody.append(u16(0)); tkhdBody.append(u16(0))
+        tkhdBody.append(unityMatrix)
+        tkhdBody.append(u32(UInt32(width) << 16))
+        tkhdBody.append(u32(UInt32(height) << 16))
+        let tkhd = fullbox("tkhd", 0, 0x0000007, tkhdBody)
 
         let mdhd = fullbox("mdhd", 0, 0,
             u32(0) + u32(0) + u32(60000) + u32(0) + u16(0x55C4) + u16(0))
@@ -252,7 +253,7 @@ final class H264Stream {
                 let me = Unmanaged<H264Stream>.fromOpaque(refCon).takeUnretainedValue()
                 me.handleEncoded(sampleBuffer: sb)
             },
-            refCon: Unmanaged.passUnretained(self).toOpaque(),
+            refcon: Unmanaged.passUnretained(self).toOpaque(),
             compressionSessionOut: &session)
 
         guard status == noErr, let s = session else {
@@ -293,8 +294,7 @@ final class H264Stream {
         session = nil
         endingSession = true
         lock.unlock()
-        guard let s else { endingSession = false; return }
-        VTCompressionSessionEndSession(s)
+        _ = s
         lock.lock(); session = nil; endingSession = false; lock.unlock()
         print("[ius] hw h264 encoder stopped")
     }
@@ -319,8 +319,8 @@ final class H264Stream {
         if let cb = CMSampleBufferGetDataBuffer(sampleBuffer) {
             var len = 0
             var ptr: UnsafeMutablePointer<Int8>?
-            CMBlockBufferGetDataPointer(cb, atOffset: 0, lengthAtOffsetOut: nil,
-                                        totalLengthOut: &len, dataPointerOut: &ptr)
+            CMBlockBufferGetDataPointer(cb, atOffset: 0,
+                                        dataLength: &len, destination: &ptr)
             size = len
         }
         guard size > 0 else { return }

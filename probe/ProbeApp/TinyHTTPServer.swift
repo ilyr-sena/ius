@@ -14,6 +14,8 @@ final class TinyHTTPServer {
     var rawHandler: RawHandler?
     /// If set, a GET with `Upgrade: websocket` on this path takes over the connection.
     var webSocketHandler: WebSocketHandler?
+    /// MJPEG-style takeover for an exact request path.
+    var streamHandler: WebSocketHandler?
 
     private static let wsGUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
@@ -58,6 +60,12 @@ final class TinyHTTPServer {
                 headers[k] = v
             }
 
+            // MJPEG-style exact-path takeover
+            if method == "GET", path == "/stream", let sh = self.streamHandler {
+                sh(conn, headers)
+                return
+            }
+
             // WebSocket upgrade
             if method == "GET",
                headers["upgrade"]?.lowercased() == "websocket",
@@ -92,16 +100,14 @@ final class TinyHTTPServer {
     }
 
     static func wsAccept(key: String) -> String {
-        Digest.sha1(data: Data((key + wsGUID).utf8)).base64EncodedString()
+        wsSHA1(Data((key + wsGUID).utf8)).base64EncodedString()
     }
 }
 
 import CryptoKit
 
-extension Digest {
-    static func sha1(data: Data) -> Data {
-        Data(Insecure.SHA1.hash(data: data))
-    }
+private func wsSHA1(_ data: Data) -> Data {
+    Data(Insecure.SHA1.hash(data: data))
 }
 
 /// Minimal server-side WebSocket: binary/text sends, close/ping handling.
