@@ -1,0 +1,51 @@
+name: wda-build
+on:
+  workflow_dispatch:
+  push:
+    paths: [".github/workflows/wda-build.yml"]
+
+jobs:
+  build:
+    runs-on: xcode-27
+    steps:
+      - name: Clone WebDriverAgent
+        run: git clone --depth 1 https://github.com/appium/WebDriverAgent.git
+
+      - name: Build WDA runner (unsigned)
+        working-directory: WebDriverAgent
+        run: |
+          xcodebuild build-for-testing \
+            -project WebDriverAgent.xcodeproj \
+            -scheme WebDriverAgentRunner \
+            -destination 'generic/platform=iOS' \
+            -configuration Debug \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY=""
+
+      - name: Ad-hoc sign app and all nested bundles
+        working-directory: WebDriverAgent
+        run: |
+          APP=$(find build/Build/Products/Debug-iphoneos -maxdepth 1 -name '*Runner.app' | head -1)
+          echo "app: $APP"
+          # sign deepest-first so every Mach-O carries a valid structure for
+          # Sideloadly to re-sign over (it skips PlugIns/*.xctest otherwise)
+          find "$APP" -type d \( -name '*.xctest' -o -name '*.framework' \) | sort -r | while read -r b; do
+            codesign --force --sign - "$b" && echo "signed: $b"
+          done
+          find "$APP" -type f -perm +111 -name '*.dylib' | while read -r d; do
+            codesign --force --sign - "$d" && echo "signed: $d"
+          done
+          codesign --force --sign - "$APP"
+
+      - name: Package unsigned IPA
+        working-directory: WebDriverAgent
+        run: |
+          APP=$(find build/Build/Products/Debug-iphoneos -maxdepth 1 -name '*Runner.app' | head -1)
+          mkdir -p Payload
+          cp -R "$APP" Payload/
+          zip -qry WebDriverAgentRunner-unsigned.ipa Payload
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: WebDriverAgentRunner-unsigned-ipa
+          path: WebDriverAgent/WebDriverAgentRunner-unsigned.ipa
