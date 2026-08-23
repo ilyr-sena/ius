@@ -39,14 +39,14 @@ jobs:
             -project IUSProbe.xcodeproj \
             -scheme IUSProbe \
             -destination 'generic/platform=iOS' \
-            -configuration Debug \
+            -configuration Release \
             -derivedDataPath build \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY=""
 
       - name: Package unsigned IPA
         working-directory: probe
         run: |
-          APP=$(find build/Build/Products/Debug-iphoneos -maxdepth 1 -name '*.app' | head -1)
+          APP=$(find build/Build/Products/Release-iphoneos -maxdepth 1 -name '*.app' | head -1)
           echo "app: $APP"
           mkdir -p Payload
           cp -R "$APP" Payload/
