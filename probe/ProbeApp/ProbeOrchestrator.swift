@@ -63,12 +63,12 @@ final class ProbeOrchestrator {
     }
 
     private func runPlan() {
-        setPhase("pip")
-        let pipOK = PiPPresenter.shared.prepareInline()
+        setPhase("audio")
+        let audioOK = AudioKeepAlive.shared.start()
         lock.lock()
-        report["pip"] = PiPPresenter.shared.isActive() ? "playing" : ("failed: \(PiPPresenter.shared.lastError ?? "?")")
+        report["audio"] = audioOK ? "running" : "failed: \(AudioKeepAlive.shared.lastError ?? "?")"
         lock.unlock()
-        print("[ius] inline video \(pipOK ? "playing" : "FAILED")")
+        print("[ius] audio keep-alive \(audioOK ? "running" : "FAILED")")
 
         setPhase("inventory")
         let inv = capture.inventory()
@@ -104,7 +104,6 @@ final class ProbeOrchestrator {
 
         setPhase("awaiting-background")
         print("[ius] SWIPE UP to the home screen now (keep device unlocked, screen on)")
-        PiPPresenter.shared.armForBackground()
         var bg = false
         for _ in 0..<60 {
             Thread.sleep(forTimeInterval: 0.5)
