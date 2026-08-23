@@ -7,6 +7,8 @@ final class TinyHTTPServer {
     private var listener: NWListener?
     private let queue = DispatchQueue(label: "ius.http")
     var handler: Handler?
+    /// If set, a GET matching this path prefix takes over the connection (e.g. MJPEG).
+    var streamHandler: ((NWConnection, String) -> Void)?
 
     func start(port: UInt16) {
         guard let l = try? NWListener(using: .tcp, on: NWEndpoint.Port(rawValue: port)!) else {
@@ -35,6 +37,10 @@ final class TinyHTTPServer {
                 let method = parts.isEmpty ? "GET" : String(parts[0])
                 let rawPath = parts.count > 1 ? String(parts[1]) : "/"
                 let path = String(rawPath.split(separator: "?")[0])
+                if let sh = self.streamHandler, path.hasPrefix("/stream") {
+                    sh(conn, path)
+                    return
+                }
                 let (status, json) = self.handler?(method, path) ?? (404, ["error": "no handler"])
                 let body = (try? JSONSerialization.data(withJSONObject: json)) ?? Data()
                 var resp = "HTTP/1.1 \(status)\r\nContent-Type: application/json\r\nContent-Length: \(body.count)\r\nConnection: close\r\n\r\n".data(using: .utf8)!

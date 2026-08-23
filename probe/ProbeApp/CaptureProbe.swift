@@ -19,9 +19,7 @@ final class CaptureProbe: NSObject, SCStreamDelegate, SCStreamOutput, SCContentS
     private var lastFrameAt: DispatchTime?
     private var foregroundFrames = 0
     private var backgroundFrames = 0
-    private var lockedFrames = 0
     private var backgrounded = false
-    private var locked = false
     private var intervals: [Double] = []
     private var stopError: String?
 
@@ -31,11 +29,6 @@ final class CaptureProbe: NSObject, SCStreamDelegate, SCStreamOutput, SCContentS
 
     func markBackgrounded() {
         lock.lock(); backgrounded = true; lock.unlock()
-    }
-
-    func setLocked(_ l: Bool) {
-        lock.lock(); let changed = locked != l; locked = l; lock.unlock()
-        if changed { print("[ius] device lock state -> \(l)") }
     }
 
     func inventory() -> [String: Any] {
@@ -155,10 +148,9 @@ final class CaptureProbe: NSObject, SCStreamDelegate, SCStreamOutput, SCContentS
     func stats() -> [String: Any] {
         lock.lock(); defer { lock.unlock() }
         var out: [String: Any] = [
-            "totalFrames": foregroundFrames + backgroundFrames + lockedFrames,
+            "totalFrames": foregroundFrames + backgroundFrames,
             "foregroundFrames": foregroundFrames,
             "backgroundFrames": backgroundFrames,
-            "lockedFrames": lockedFrames,
         ]
         if let s = startedAt, let f = firstFrameAt {
             out["firstFrameMs"] = Double(f.uptimeNanoseconds - s.uptimeNanoseconds) / 1e6
@@ -187,9 +179,8 @@ final class CaptureProbe: NSObject, SCStreamDelegate, SCStreamOutput, SCContentS
             intervals.append(Double(now.uptimeNanoseconds - last.uptimeNanoseconds) / 1e6)
         }
         lastFrameAt = now
-        if locked { lockedFrames += 1 }
-        else if backgrounded { backgroundFrames += 1 }
-        else { foregroundFrames += 1 }
+        MJPEGStreamer.shared.publish(sampleBuffer: sampleBuffer)
+        if backgrounded { backgroundFrames += 1 } else { foregroundFrames += 1 }
     }
 
     // SCStreamDelegate
@@ -222,7 +213,6 @@ final class CaptureProbe: NSObject, SCStreamDelegate, SCStreamOutput, SCContentS
 
 final class CaptureProbe: NSObject {
     func markBackgrounded() {}
-    func setLocked(_ l: Bool) {}
 
     func inventory() -> [String: Any] {
         return [
@@ -245,7 +235,6 @@ final class CaptureProbe: NSObject {
             "totalFrames": 0,
             "foregroundFrames": 0,
             "backgroundFrames": 0,
-            "lockedFrames": 0,
         ]
     }
 }
