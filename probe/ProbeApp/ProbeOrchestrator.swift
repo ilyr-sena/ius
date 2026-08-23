@@ -11,6 +11,7 @@ final class ProbeOrchestrator {
     private var report: [String: Any] = [:]
     private var running = false
     private var backgrounded = false
+    private var deviceLocked = false
     private var started = false
 
     func currentPhase() -> String {
@@ -35,6 +36,20 @@ final class ProbeOrchestrator {
             self.lock.unlock()
             self.capture.markBackgrounded()
             print("[ius] didEnterBackground observed")
+        }
+        NotificationCenter.default.addObserver(
+            forName: UIApplication.protectedDataWillBecomeUnavailableNotification, object: nil, queue: nil
+        ) { [weak self] _ in
+            guard let self else { return }
+            self.lock.lock(); self.deviceLocked = true; self.lock.unlock()
+            self.capture.setLocked(true)
+        }
+        NotificationCenter.default.addObserver(
+            forName: UIApplication.protectedDataDidBecomeAvailableNotification, object: nil, queue: nil
+        ) { [weak self] _ in
+            guard let self else { return }
+            self.lock.lock(); self.deviceLocked = false; self.lock.unlock()
+            self.capture.setLocked(false)
         }
     }
 
@@ -114,7 +129,7 @@ final class ProbeOrchestrator {
 
         if bg {
             setPhase("background-fps")
-            let b0 = capture.stats()["backgroundFrames"] as? Int ?? 0
+            let b0 = capture.stats()["totalFrames"] as? Int ?? 0
             Thread.sleep(forTimeInterval: 10)
             let st = capture.stats()
             let bFps = Double((st["backgroundFrames"] as? Int ?? 0) - b0) / 10.0
@@ -123,6 +138,74 @@ final class ProbeOrchestrator {
             if let e = st["stopError"] as? String { report["captureStopError"] = e }
             lock.unlock()
         }
+
+        // ---- Lock survival test ----
+        setPhase("awaiting-lock")
+        print("[ius] LOCK TEST: press the LOCK BUTTON now, keep locked ~5s, then unlock")
+        let preLockTotal = capture.stats()["totalFrames"] as? Int ?? 0
+        var sawLock = false
+        for _ in 0..<40 {
+            Thread.sleep(forTimeInterval: 0.5)
+            lock.lock(); let l = deviceLocked; lock.unlock()
+            if l { sawLock = true; break }
+        }
+        if sawLock {
+            report["lockedDetected"] = true
+            let lockStart = DispatchTime.now()
+            for _ in 0..<16 {                       // hold the locked window ~8s (or until unlocked)
+                Thread.sleep(forTimeInterval: 0.5)
+                lock.lock(); if !deviceLocked { break }; lock.unlock()
+            }
+            let lockWindowS = Double(DispatchTime.now().uptimeNanoseconds - lockStart.uptimeNanoseconds) / 1e9
+            let st1 = capture.stats()
+            let lockedDelta = (st1["totalFrames"] as? Int ?? 0) - preLockTotal
+            lock.lock(); report["lockWindowS"] = lockWindowS; lock.unlock()
+            report["framesWhileLocked"] = lockedDelta
+            report["lockedFps"] = Double(lockedDelta) / max(lockWindowS, 0.001)
+            if let e = st1["stopError"] as? String { report["streamStoppedOnLock"] = e }
+
+            setPhase("awaiting-unlock")
+            var unlocked = false
+            for _ in 0..<60 {                       // up to 30s for user to unlock
+                Thread.sleep(forTimeInterval: 0.5)
+                lock.lock(); let l = deviceLocked; lock.unlock()
+                if !l { unlocked = true; break }
+            }
+            if unlocked {
+                let r0 = DispatchTime.now()
+                var cur = capture.stats()
+                if (cur["msSinceLastFrame"] as? Double ?? 9_999) > 2_000 || cur["stopError"] != nil {
+                    print("[ius] stream dead after lock — restarting from cached filter")
+                    if let err = capture.restart(width: w, height: h) {
+                        report["restartError"] = err
+                        print("[ius] restart FAILED: \(err)")
+                    }
+                }
+                let target = (cur["totalFrames"] as? Int ?? 0) + 1
+                var recMs: Double = -1
+                for _ in 0..<60 {                   // up to 15s for frames to flow again
+                    Thread.sleep(forTimeInterval: 0.25)
+                    cur = capture.stats()
+                    if (cur["totalFrames"] as? Int ?? 0) >= target,
+                       (cur["msSinceLastFrame"] as? Double ?? 9_999) < 1_000 {
+                        recMs = Double(DispatchTime.now().uptimeNanoseconds - r0.uptimeNanoseconds) / 1e6
+                        break
+                    }
+                }
+                report["recoveryMs"] = recMs
+                let p0 = capture.stats()["totalFrames"] as? Int ?? 0
+                setPhase("post-unlock-fps")
+                Thread.sleep(forTimeInterval: 5)
+                let p1 = capture.stats()["totalFrames"] as? Int ?? 0
+                report["postUnlockFps"] = Double(p1 - p0) / 5.0
+            } else {
+                report["unlockObserved"] = false
+            }
+        } else {
+            report["lockedDetected"] = false
+            print("[ius] no lock event detected — is a passcode set on this device?")
+        }
+        // ---- end lock test ----
 
         capture.stopCapture()
         Thread.sleep(forTimeInterval: 0.5)

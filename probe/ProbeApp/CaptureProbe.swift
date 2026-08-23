@@ -12,13 +12,16 @@ final class CaptureProbe: NSObject, SCStreamDelegate, SCStreamOutput, SCContentS
     private let q = DispatchQueue(label: "ius.capture")
     private let lock = NSLock()
     private var stream: SCStream?
+    private var grantedFilter: SCContentFilter?
 
     private var startedAt: DispatchTime?
     private var firstFrameAt: DispatchTime?
     private var lastFrameAt: DispatchTime?
     private var foregroundFrames = 0
     private var backgroundFrames = 0
+    private var lockedFrames = 0
     private var backgrounded = false
+    private var locked = false
     private var intervals: [Double] = []
     private var stopError: String?
 
@@ -28,6 +31,11 @@ final class CaptureProbe: NSObject, SCStreamDelegate, SCStreamOutput, SCContentS
 
     func markBackgrounded() {
         lock.lock(); backgrounded = true; lock.unlock()
+    }
+
+    func setLocked(_ l: Bool) {
+        lock.lock(); let changed = locked != l; locked = l; lock.unlock()
+        if changed { print("[ius] device lock state -> \(l)") }
     }
 
     func inventory() -> [String: Any] {
@@ -74,16 +82,8 @@ final class CaptureProbe: NSObject, SCStreamDelegate, SCStreamOutput, SCContentS
                                   userInfo: [NSLocalizedDescriptionKey: "no filter returned from picker"])
                 }
 
-                let cfg = SCStreamConfiguration()
-                cfg.width = width
-                cfg.height = height
-
-                let s = SCStream(filter: filter, configuration: cfg, delegate: self)
-                try s.addStreamOutput(self, type: .screen, sampleHandlerQueue: q)
-                lock.lock(); startedAt = DispatchTime.now(); lock.unlock()
-                try await s.startCapture()
-                lock.lock(); stream = s; lock.unlock()
-                print("[ius] capture started")
+                lock.lock(); grantedFilter = filter; lock.unlock()
+                errOut = startStream(filter: filter, width: width, height: height)
             } catch {
                 errOut = String(describing: error)
             }
@@ -93,26 +93,78 @@ final class CaptureProbe: NSObject, SCStreamDelegate, SCStreamOutput, SCContentS
         return errOut
     }
 
-    func stopCapture() {
+    /// Rebuilds the stream from the previously-granted filter — no picker interaction.
+    func restart(width: Int, height: Int) -> String? {
+        lock.lock(); let f = grantedFilter; stopError = nil; lock.unlock()
+        guard let f else { return "no cached filter" }
+        return startStream(filter: f, width: width, height: height)
+    }
+
+    func hasCachedFilter() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return grantedFilter != nil
+    }
+
+    private func startStream(filter: SCContentFilter, width: Int, height: Int) -> String? {
+        stopStreamOnly()
+        let sem = DispatchSemaphore(value: 0)
+        var errOut: String?
+        Task.detached { [self] in
+            do {
+                let cfg = SCStreamConfiguration()
+                cfg.width = width
+                cfg.height = height
+
+                let s = SCStream(filter: filter, configuration: cfg, delegate: self)
+                try s.addStreamOutput(self, type: .screen, sampleHandlerQueue: q)
+                lock.lock();
+                startedAt = DispatchTime.now()
+                firstFrameAt = nil
+                lastFrameAt = nil
+                lock.unlock()
+                try await s.startCapture()
+                lock.lock(); stream = s; lock.unlock()
+                print("[ius] capture stream running")
+            } catch {
+                errOut = String(describing: error)
+            }
+            sem.signal()
+        }
+        sem.wait()
+        return errOut
+    }
+
+    func stopStreamOnly() {
         lock.lock(); let s = stream; stream = nil; lock.unlock()
+        guard let s else { return }
         let sem = DispatchSemaphore(value: 0)
         Task.detached { [self] in
             if let s { try? await s.stopCapture() }
-            SCContentSharingPicker.shared.remove(self)
             sem.signal()
         }
         _ = sem.wait(timeout: .now() + 5)
     }
 
+    func stopCapture() {
+        stopStreamOnly()
+        Task.detached { [self] in
+            SCContentSharingPicker.shared.remove(self)
+        }
+    }
+
     func stats() -> [String: Any] {
         lock.lock(); defer { lock.unlock() }
         var out: [String: Any] = [
-            "totalFrames": foregroundFrames + backgroundFrames,
+            "totalFrames": foregroundFrames + backgroundFrames + lockedFrames,
             "foregroundFrames": foregroundFrames,
             "backgroundFrames": backgroundFrames,
+            "lockedFrames": lockedFrames,
         ]
         if let s = startedAt, let f = firstFrameAt {
             out["firstFrameMs"] = Double(f.uptimeNanoseconds - s.uptimeNanoseconds) / 1e6
+        }
+        if let last = lastFrameAt {
+            out["msSinceLastFrame"] = Double(DispatchTime.now().uptimeNanoseconds - last.uptimeNanoseconds) / 1e6
         }
         if !intervals.isEmpty {
             let sorted = intervals.sorted()
@@ -135,12 +187,17 @@ final class CaptureProbe: NSObject, SCStreamDelegate, SCStreamOutput, SCContentS
             intervals.append(Double(now.uptimeNanoseconds - last.uptimeNanoseconds) / 1e6)
         }
         lastFrameAt = now
-        if backgrounded { backgroundFrames += 1 } else { foregroundFrames += 1 }
+        if locked { lockedFrames += 1 }
+        else if backgrounded { backgroundFrames += 1 }
+        else { foregroundFrames += 1 }
     }
 
     // SCStreamDelegate
     func stream(_ stream: SCStream, didStopWithError error: Error) {
-        lock.lock(); stopError = String(describing: error); lock.unlock()
+        lock.lock()
+        if stopError == nil { stopError = String(describing: error) }
+        lock.unlock()
+        print("[ius] stream stopped: \(error)")
     }
 
     // SCContentSharingPickerObserver
@@ -165,6 +222,7 @@ final class CaptureProbe: NSObject, SCStreamDelegate, SCStreamOutput, SCContentS
 
 final class CaptureProbe: NSObject {
     func markBackgrounded() {}
+    func setLocked(_ l: Bool) {}
 
     func inventory() -> [String: Any] {
         return [
@@ -177,6 +235,8 @@ final class CaptureProbe: NSObject {
         return "ScreenCaptureKit unavailable: requires iOS 27+ SDK"
     }
 
+    func restart(width: Int, height: Int) -> String? { "unavailable" }
+    func hasCachedFilter() -> Bool { false }
     func stopCapture() {}
 
     func stats() -> [String: Any] {
@@ -185,6 +245,7 @@ final class CaptureProbe: NSObject {
             "totalFrames": 0,
             "foregroundFrames": 0,
             "backgroundFrames": 0,
+            "lockedFrames": 0,
         ]
     }
 }

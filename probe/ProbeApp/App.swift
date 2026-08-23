@@ -20,7 +20,7 @@ struct ProbeStatusView: View {
                 .font(.headline)
             Text("phase: \(phase)")
                 .font(.subheadline.monospaced())
-            Text("Drive over USB:\npython3 tools/probe_run.py\n\nAn audio keep-alive tone runs during the probe. Swipe home at awaiting-background, keep the screen on, don't lock.")
+            Text("Drive over USB:\npython3 tools/probe_run.py\n\nSequence: pick display → swipe home at awaiting-background → at awaiting-lock press the LOCK button (~5s) then unlock. Audio keep-alive runs throughout.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
