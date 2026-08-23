@@ -61,7 +61,6 @@ final class EncoderProbe {
         VTSessionSetProperty(s, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: 60 as CFNumber)
         VTSessionSetProperty(s, key: kVTCompressionPropertyKey_ProfileLevel, value: kVTProfileLevel_H264_High_AutoLevel)
         VTSessionSetProperty(s, key: kVTCompressionPropertyKey_AllowFrameReordering, value: false as CFBoolean)
-        VTSessionPrepareToEncodeFrames(s)
 
         var pool: CVPixelBufferPool?
         let pbAttrs: [CFString: Any] = [
@@ -82,12 +81,12 @@ final class EncoderProbe {
             guard let pb else { break }
             CVPixelBufferLockBaseAddress(pb, [])
             if let base = CVPixelBufferGetBaseAddress(pb) {
-                memset(base, UInt8(truncatingIfNeeded: i &* 61), CVPixelBufferGetDataSize(pb))
+                memset(base, Int32(truncatingIfNeeded: i &* 61), CVPixelBufferGetDataSize(pb))
             }
             CVPixelBufferUnlockBaseAddress(pb, [])
             let pts = CMTime(value: CMTimeValue(i), timescale: CMTimeScale(fps))
-            VTCompressionSessionEncodeFrame(s, imageBuffer: pb, presentationTimestamp: pts,
-                                            duration: nil, frameProperties: nil,
+            VTCompressionSessionEncodeFrame(s, imageBuffer: pb, presentationTimeStamp: pts,
+                                            duration: .invalid, frameProperties: nil,
                                             sourceFrameRefcon: nil, infoFlagsOut: nil)
             submitted += 1
         }
