@@ -129,15 +129,16 @@ final class MJPEGStreamer {
 
             for (key, group) in groups {
                 if group.cfg.maxFps > 0 {
+                    let now = DispatchTime.now()
                     self.lock.lock()
                     let last = self.lastSent[key]
-                    self.lastSent[key] = DispatchTime.now()
                     self.lock.unlock()
                     if let last,
-                       Double(DispatchTime.now().uptimeNanoseconds - last.uptimeNanoseconds) / 1e9
+                       Double(now.uptimeNanoseconds - last.uptimeNanoseconds) / 1e9
                         < 1.0 / group.cfg.maxFps {
                         continue
                     }
+                    self.lock.lock(); self.lastSent[key] = now; self.lock.unlock()
                 }
 
                 var scaled = ci

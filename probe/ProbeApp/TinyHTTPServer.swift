@@ -38,7 +38,7 @@ final class TinyHTTPServer {
                 let rawPath = parts.count > 1 ? String(parts[1]) : "/"
                 let path = String(rawPath.split(separator: "?")[0])
                 if let sh = self.streamHandler, path.hasPrefix("/stream") {
-                    sh(conn, path)
+                    sh(conn, rawPath)               // keep query string for tuning params
                     return
                 }
                 let (status, json) = self.handler?(method, path) ?? (404, ["error": "no handler"])
