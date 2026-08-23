@@ -303,7 +303,7 @@ final class H264Stream {
         if let arr = CMSampleBufferGetSampleAttachmentsArray(sb, createIfNecessary: false)
             as? [[String: Any]],
            let first = arr.first {
-            let depends = first[kCMSampleAttachmentKey_DependsOnOthers] as? Bool ?? true
+            let depends = first[kCMSampleAttachmentKey_DependsOnOthers as String] as? Bool ?? true
             return !depends
         }
         return false
@@ -319,8 +319,8 @@ final class H264Stream {
         if let cb = CMSampleBufferGetDataBuffer(sampleBuffer) {
             var len = 0
             var ptr: UnsafeMutablePointer<Int8>?
-            CMBlockBufferGetDataPointer(cb, atOffset: 0,
-                                        dataLength: &len, destination: &ptr)
+            CMBlockBufferGetDataPointer(cb, atOffset: 0, lengthAtOffsetOut: nil,
+                                        totalLengthOut: &len, dataPointerOut: &ptr)
             size = len
         }
         guard size > 0 else { return }
@@ -328,7 +328,7 @@ final class H264Stream {
         payload.withUnsafeMutableBytes { raw in
             _ = CMBlockBufferCopyDataBytes(
                 CMSampleBufferGetDataBuffer(sampleBuffer)!,
-                offsetToData: 0, dataLength: size, destination: raw.baseAddress!)
+                atOffset: 0, dataLength: size, destination: raw.baseAddress!)
         }
 
         let pts = CMSampleBufferGetOutputPresentationTimeStamp(sampleBuffer)

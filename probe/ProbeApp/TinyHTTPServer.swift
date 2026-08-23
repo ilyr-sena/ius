@@ -15,7 +15,7 @@ final class TinyHTTPServer {
     /// If set, a GET with `Upgrade: websocket` on this path takes over the connection.
     var webSocketHandler: WebSocketHandler?
     /// MJPEG-style takeover for an exact request path.
-    var streamHandler: WebSocketHandler?
+    var streamHandler: ((NWConnection, String) -> Void)?
 
     private static let wsGUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
@@ -62,7 +62,7 @@ final class TinyHTTPServer {
 
             // MJPEG-style exact-path takeover
             if method == "GET", path == "/stream", let sh = self.streamHandler {
-                sh(conn, headers)
+                sh(conn, rawPath)
                 return
             }
 
@@ -131,14 +131,14 @@ final class WebSocketConn {
         guard !closed else { return }
         closed = true
         conn.cancel()
-        onClose?()
+        onClose()
     }
 
     private func failClose() {
         guard !closed else { return }
         closed = true
         conn.cancel()
-        onClose?()
+        onClose()
     }
 
     func sendBinary(_ data: Data) {
