@@ -116,7 +116,7 @@ final class PiPPresenter: NSObject {
     func armForBackground() {
         DispatchQueue.main.sync {
             pip?.canStartPictureInPictureAutomaticallyFromInline = true
-            pip?.startPiP()
+            pip?.startPictureInPicture()
         }
     }
 
