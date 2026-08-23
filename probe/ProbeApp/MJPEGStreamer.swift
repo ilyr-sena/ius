@@ -33,25 +33,6 @@ struct StreamConfig {
         }
         return c
     }
-
-    /// Tuned values survive app relaunches — no need to re-append URL params.
-    func persist(_ cfg: StreamConfig) {
-        let d = UserDefaults.standard
-        d.set(cfg.maxFps, forKey: "ius.stream.fps")
-        d.set(Double(cfg.scale), forKey: "ius.stream.scale")
-        d.set(Double(cfg.quality), forKey: "ius.stream.quality")
-    }
-
-    static func loadPersisted() -> StreamConfig {
-        let d = UserDefaults.standard
-        var c = StreamConfig()
-        if d.object(forKey: "ius.stream.fps") != nil {
-            c.maxFps = d.double(forKey: "ius.stream.fps")
-            c.scale = CGFloat(d.double(forKey: "ius.stream.scale"))
-            c.quality = CGFloat(d.double(forKey: "ius.stream.quality"))
-        }
-        return c
-    }
 }
 
 /// Pushes captured frames to connected browsers as multipart JPEG.
@@ -76,6 +57,25 @@ final class MJPEGStreamer {
     var hasViewers: Bool {
         lock.lock(); defer { lock.unlock() }
         return !clients.isEmpty
+    }
+
+    /// Tuned values survive app relaunches — no need to re-append URL params.
+    func persist(_ cfg: StreamConfig) {
+        let d = UserDefaults.standard
+        d.set(cfg.maxFps, forKey: "ius.stream.fps")
+        d.set(Double(cfg.scale), forKey: "ius.stream.scale")
+        d.set(Double(cfg.quality), forKey: "ius.stream.quality")
+    }
+
+    static func loadPersisted() -> StreamConfig {
+        let d = UserDefaults.standard
+        var c = StreamConfig()
+        if d.object(forKey: "ius.stream.fps") != nil {
+            c.maxFps = d.double(forKey: "ius.stream.fps")
+            c.scale = CGFloat(d.double(forKey: "ius.stream.scale"))
+            c.quality = CGFloat(d.double(forKey: "ius.stream.quality"))
+        }
+        return c
     }
 
     /// Registers a browser connection; settings parsed from the request path.
