@@ -24,7 +24,6 @@ final class CaptureProbe: NSObject, SCStreamDelegate, SCStreamOutput {
     }
 
     func inventory() -> [String: Any] {
-        guard #available(iOS 27.0, *) else { return ["available": false] }
         let sem = DispatchSemaphore(value: 0)
         var out: [String: Any] = [:]
         Task.detached {
@@ -44,7 +43,6 @@ final class CaptureProbe: NSObject, SCStreamDelegate, SCStreamOutput {
     }
 
     func startCapture(width: Int, height: Int) -> String? {
-        guard #available(iOS 27.0, *) else { return "SCK unavailable on this OS" }
         let sem = DispatchSemaphore(value: 0)
         var errOut: String?
         Task.detached { [self] in
@@ -78,7 +76,6 @@ final class CaptureProbe: NSObject, SCStreamDelegate, SCStreamOutput {
     }
 
     func stopCapture() {
-        guard #available(iOS 27.0, *) else { return }
         lock.lock(); let s = stream; stream = nil; lock.unlock()
         let sem = DispatchSemaphore(value: 0)
         Task.detached {
