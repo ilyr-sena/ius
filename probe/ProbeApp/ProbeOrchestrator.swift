@@ -26,8 +26,8 @@ final class ProbeOrchestrator {
             return self.route(method: method, path: path)
         }
         server.start(port: port)
-        server.streamHandler = { conn, _ in
-            MJPEGStreamer.shared.serve(conn)
+        server.streamHandler = { conn, path in
+            MJPEGStreamer.shared.serve(conn, path: path)
         }
         NotificationCenter.default.addObserver(
             forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: nil
