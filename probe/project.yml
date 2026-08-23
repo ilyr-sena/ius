@@ -24,6 +24,7 @@ targets:
         CFBundleDisplayName: IUSProbe
         UILaunchScreen: {}
         UIBackgroundModes: [screen-capture]
+        NSScreenCaptureUsageDescription: The probe streams the full screen to measure encoder behavior.
         NSLocalNetworkUsageDescription: The probe serves its status over a local HTTP port.
 
 schemes:

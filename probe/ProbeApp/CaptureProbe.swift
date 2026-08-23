@@ -50,12 +50,20 @@ final class CaptureProbe: NSObject, SCStreamDelegate, SCStreamOutput, SCContentS
                 picker.add(self)
 
                 lock.lock(); pendingFilter = nil; pickerError = nil; lock.unlock()
-                DispatchQueue.main.sync { picker.present() }
-                print("[ius] screen-sharing picker presented — select the full display (timeout \(Self.pickerTimeoutSeconds)s)")
+                var presented = false
+                DispatchQueue.main.sync {
+                    picker.present()
+                    presented = picker.isActive
+                }
+                print("[ius] picker.present() called (isActive=\(presented)) — select the full display (timeout \(Self.pickerTimeoutSeconds)s)")
+                if !presented {
+                    throw NSError(domain: "ius", code: 5,
+                                  userInfo: [NSLocalizedDescriptionKey: "SCContentSharingPicker did not become active — check NSScreenCaptureUsageDescription/screen-recording permission"])
+                }
 
                 if filterSem.wait(timeout: .now() + .init(Self.pickerTimeoutSeconds)) == .timedOut {
                     throw NSError(domain: "ius", code: 2,
-                                  userInfo: [NSLocalizedDescriptionKey: "timed out waiting for picker selection"])
+                                  userInfo: [NSLocalizedDescriptionKey: "timed out waiting for picker selection — did the system picker appear and get confirmed on screen?"])
                 }
                 lock.lock(); let err = pickerError; let filter = pendingFilter; lock.unlock()
                 if let err { throw NSError(domain: "ius", code: 3,
