@@ -1,0 +1,49 @@
+name: probe-build
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ["probe/**", ".github/workflows/probe-build.yml"]
+
+jobs:
+  build:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain info
+        run: |
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+
+      - name: Install xcodegen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        working-directory: probe
+        run: xcodegen generate
+
+      - name: Build for testing (unsigned)
+        working-directory: probe
+        run: |
+          xcodebuild build-for-testing \
+            -project IUSProbe.xcodeproj \
+            -scheme IUSProbe \
+            -destination 'generic/platform=iOS' \
+            -configuration Debug \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY=""
+
+      - name: Package unsigned IPA
+        working-directory: probe
+        run: |
+          APP=$(find build/Build/Products/Debug-iphoneos -maxdepth 1 -name '*Runner.app' | head -1)
+          echo "runner app: $APP"
+          mkdir -p Payload
+          cp -R "$APP" Payload/
+          zip -qry IUSProbeRunner-unsigned.ipa Payload
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: IUSProbeRunner-unsigned-ipa
+          path: probe/IUSProbeRunner-unsigned.ipa
