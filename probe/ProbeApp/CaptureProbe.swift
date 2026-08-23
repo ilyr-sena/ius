@@ -52,7 +52,7 @@ final class CaptureProbe: NSObject, SCStreamDelegate, SCStreamOutput, SCContentS
                 var presented = false
                 DispatchQueue.main.sync {
                     picker.add(self)
-                    picker.setActive(true, for: nil)
+                    picker.isActive = true
                     picker.present()
                     presented = picker.isActive
                 }
