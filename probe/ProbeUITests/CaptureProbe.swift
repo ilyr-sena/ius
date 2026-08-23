@@ -45,9 +45,7 @@ final class CaptureProbe: NSObject, SCStreamDelegate, SCStreamOutput, SCContentS
         Task.detached { [self] in
             do {
                 let picker = SCContentSharingPicker.shared
-                var pcfg = SCContentSharingPickerConfiguration()
-                pcfg.allowedPickerModes = [.singleDisplay]
-                pcfg.allowsChangingSelectedContent = false
+                let pcfg = SCContentSharingPickerConfiguration()
                 picker.defaultConfiguration = pcfg
                 picker.add(self)
 
