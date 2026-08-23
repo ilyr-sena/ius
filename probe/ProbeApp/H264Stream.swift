@@ -370,8 +370,8 @@ final class H264Stream {
         }
         lock.unlock()
     }
+}
 
-    // SCStreamDelegate-style stop reporting (unused by VT path)
 extension H264Stream {
     fileprivate func handleEncodedWithSync(sampleBuffer: CMSampleBuffer) {}
 }
