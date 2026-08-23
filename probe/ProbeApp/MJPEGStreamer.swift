@@ -62,19 +62,16 @@ final class MJPEGStreamer {
             guard let conn else { return }
             while true {
                 let state = conn.state
-                if state == .cancelled || state == .failed { break }
+                if state == .cancelled || state == .failed || state != .ready { break }
                 if let d = self?.current() {
                     var payload = Data("--iusframe\r\nContent-Type: image/jpeg\r\nContent-Length: \(d.count)\r\n\r\n".utf8)
                     payload.append(d)
                     payload.append(Data("\r\n".utf8))
                     let sem = DispatchSemaphore(value: 0)
-                    var failed = false
-                    conn.send(content: payload, completion: .contentProcessed { e in
-                        failed = (e != nil)
+                    conn.send(content: payload, completion: .contentProcessed { _ in
                         sem.signal()
                     })
                     sem.wait()
-                    if failed { conn.cancel(); break }
                 }
                 Thread.sleep(forTimeInterval: 0.07)
             }
