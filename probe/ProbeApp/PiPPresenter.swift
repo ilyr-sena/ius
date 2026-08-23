@@ -32,18 +32,19 @@ enum ClipFactory {
             CVPixelBufferLockBaseAddress(pb, [])
             if let base = CVPixelBufferGetBaseAddress(pb) {
                 let stride = CVPixelBufferGetBytesPerRow(pb)
-                let t = Float(i) / Float(total)
+                let px = base.assumingMemoryBound(to: UInt8.self)
+                let t2pi = Float(i) / Float(total) * Float.pi * 2
                 for row in 0..<height {
-                    let line = base.advanced(by: row * stride)
+                    let gBase = Float(row) / 25.0
+                    let rowOff = row * stride
                     for col in 0..<width {
-                        let p = line.advanced(by: col * 4)
-                        p.storeBytes(order: .littleEndian, as: UInt8.self,
-                                     value: UInt8(127 + 127 * sin(t * .pi * 2 + Float(col) / 25)))
-                        p.advanced(by: 1).storeBytes(order: .littleEndian, as: UInt8.self,
-                                                     value: UInt8(127 + 127 * sin(t * .pi * 2 + Float(row) / 25)))
-                        p.advanced(by: 2).storeBytes(order: .littleEndian, as: UInt8.self,
-                                                     value: UInt8(truncatingIfNeeded: Int(Float(col) + t * 255)))
-                        p.advanced(by: 3).storeBytes(order: .littleEndian, as: UInt8.self, value: 255)
+                        let s1 = sin(t2pi + Float(col) / 25.0)
+                        let s2 = sin(t2pi + gBase)
+                        let o = rowOff + col * 4
+                        px[o] = UInt8(127 + 127 * s1)
+                        px[o + 1] = UInt8(127 + 127 * s2)
+                        px[o + 2] = UInt8(truncatingIfNeeded: col + i)
+                        px[o + 3] = 255
                     }
                 }
             }
