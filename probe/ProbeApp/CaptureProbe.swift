@@ -47,11 +47,12 @@ final class CaptureProbe: NSObject, SCStreamDelegate, SCStreamOutput, SCContentS
                 let picker = SCContentSharingPicker.shared
                 let pcfg = SCContentSharingPickerConfiguration()
                 picker.defaultConfiguration = pcfg
-                picker.add(self)
 
                 lock.lock(); pendingFilter = nil; pickerError = nil; lock.unlock()
                 var presented = false
                 DispatchQueue.main.sync {
+                    picker.add(self)
+                    picker.setActive(true, for: nil)
                     picker.present()
                     presented = picker.isActive
                 }
