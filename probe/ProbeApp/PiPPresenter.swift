@@ -89,7 +89,7 @@ final class PiPPresenter: NSObject {
 
             DispatchQueue.main.sync {
                 let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
-                guard let root = scenes.first?.windows.first(where: \.isKey)?.rootViewController?.view else {
+                guard let root = scenes.first?.windows.first(where: { $0.isKeyWindow })?.rootViewController?.view else {
                     self.lastError = "no key window"
                     return
                 }
@@ -110,5 +110,5 @@ final class PiPPresenter: NSObject {
         }
     }
 
-    func isActive() -> Bool { player != nil && !(player?.timeControlStatus == .stopped) }
+    func isActive() -> Bool { player != nil && player?.timeControlStatus != .stopped }
 }
