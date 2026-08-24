@@ -26,6 +26,7 @@ final class ProbeOrchestrator {
         let w = d["width"] as? Int ?? 1170
         let h = d["height"] as? Int ?? 2532
         print("[ius] standalone capture start \(w)x\(h)")
+        _ = AudioKeepAlive.shared.start()
         if let err = capture.startCapture(width: w, height: h) {
             print("[ius] standalone capture FAILED: \(err)")
             capturingOnly = false

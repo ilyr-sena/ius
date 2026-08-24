@@ -312,7 +312,17 @@ final class H264Stream {
         guard let desc = CMSampleBufferGetFormatDescription(sampleBuffer) else { return }
         guard let ext = CMFormatDescriptionGetExtensions(desc) as? [String: Any],
               let atoms = ext["SampleDescriptionExtensionAtoms"] as? [String: Any],
-              let newAvcC = atoms["avcC"] as? Data, newAvcC.count > 8 else { return }
+              let rawAtom = atoms["avcC"] as? Data, rawAtom.count > 8 else { return }
+        // SDK may hand us the complete atom (size+fourcc+payload); normalize
+        var newAvcC = rawAtom
+        if newAvcC.count >= 8,
+           Int(newAvcC[newAvcC.startIndex]) << 24 |
+             Int(newAvcC[newAvcC.startIndex+1]) << 16 |
+             Int(newAvcC[newAvcC.startIndex+2]) << 8 |
+             Int(newAvcC[newAvcC.startIndex+3]) == newAvcC.count,
+           newAvcC[newAvcC.startIndex+4...newAvcC.startIndex+7].elementsEqual("avcC".utf8) {
+            newAvcC = newAvcC.dropFirst(8)
+        }
 
         var size = 0
         if let cb = CMSampleBufferGetDataBuffer(sampleBuffer) {
