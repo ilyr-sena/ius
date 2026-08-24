@@ -300,13 +300,33 @@ async def consume_and_stream(queue, hid):
             elif kind == "move":
                 state["fx"], state["fy"] = job["fx"], job["fy"]
             elif kind == "release":
-                state["down"] = False
-                x, y = norm(job["fx"]) + random.randint(-1, 1), \
-                       norm(job["fy"]) + random.randint(-1, 1)
-                await hid.send_touchscreen(TOUCHSCREEN_STATE_RELEASE,
-                                           max(0, min(65535, x)),
-                                           max(0, min(65535, y)))
-                print("[ius] finger up")
+                state["down"] = False                   # stop the 60Hz streamer
+                fx = state["fx"] if state["fx"] is not None else job["fx"]
+                fy = state["fy"] if state["fy"] is not None else job["fy"]
+                x, y = norm(fx), norm(fy)
+
+                freeze = t - (kin.lt or t)
+                decay = 0.82 ** max(0.0, freeze / 0.015)
+                vx = kin.vx * decay
+                vy = kin.vy * decay
+                speed = (vx*vx + vy*vy) ** 0.5
+
+                if freeze < 0.15 or speed < 0.05:
+                    # genuine flick released mid-motion: iOS momentum takes over
+                    await hid.send_touchscreen(TOUCHSCREEN_STATE_RELEASE, x, y)
+                    print("[ius] finger up - momentum!")
+                    continue
+
+                # frozen lift: the stale velocity would phantom-fling on this
+                # release... so lift, then immediately re-touch+lift at the
+                # same point - the tap cancels the momentum -> stops in place
+                print("[ius] frozen lift - momentum-cancel tap")
+                await hid.send_touchscreen(TOUCHSCREEN_STATE_RELEASE, x, y)
+                await asyncio.sleep(0.04)
+                await hid.send_touchscreen(TOUCHSCREEN_STATE_CONTACT, x, y)
+                await asyncio.sleep(0.06)
+                await hid.send_touchscreen(TOUCHSCREEN_STATE_RELEASE, x, y)
+                print("[ius] stopped in place")
 
     task = asyncio.create_task(consumer())
     try:
