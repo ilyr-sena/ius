@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Minimal native-HID remote - persistent 60Hz contact-stream edition.
 
+Self-contained: if no tunneld is listening on :49151 it spawns one via sudo
+(a single password prompt right here), then everything just works.
+
 Run:   PYTHONUNBUFFERED=1 python3 tools/hid_test.py
 Open:  http://127.0.0.1:9001/
 """
@@ -9,8 +12,11 @@ import base64
 import hashlib
 import http.server
 import json
+import os
 import pathlib
 import socket
+import subprocess
+import sys
 import threading
 import urllib.parse
 
@@ -749,7 +755,59 @@ def norm(v):
     return max(0, min(65535, round(v * 65535)))
 
 
+# ---- self-managed tunneld ----------------------------------------------------
+
+TUNNELD_PORT = 49151
+tunneld_proc = None
+
+
+def _port_open(port):
+    with socket.socket() as s:
+        s.settimeout(0.5)
+        return s.connect_ex(("127.0.0.1", port)) == 0
+
+
+def _ensure_tunneld_sync():
+    """Start a root tunneld if none is listening. Returns the Popen or None."""
+    global tunneld_proc
+    if _port_open(TUNNELD_PORT):
+        print("[*] tunneld already running")
+        return None
+    # pymobiledevice3 lives in the user's site-packages; root can't see it,
+    # so hand our PYTHONPATH through sudo explicitly.
+    user_site = os.path.expanduser(
+        "~/.local/lib/python{}.{}".format(*sys.version_info[:2])
+    )
+    env_arg = f"PYTHONPATH={user_site}"
+    print("[*] starting tunneld (sudo password prompt may appear)...")
+    proc = subprocess.Popen(
+        ["sudo", env_arg, sys.executable,
+         "-m", "pymobiledevice3", "remote", "tunneld"]
+    )
+    tunneld_proc = proc
+    return proc
+
+
+async def wait_tunneld_ready(proc, timeout_s=120):
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_s
+    while loop.time() < deadline:
+        if proc is not None and proc.poll() is not None:
+            raise SystemExit(
+                f"[!] tunneld exited early ({proc.returncode}) - "
+                f"start it manually: sudo python3 -m pymobiledevice3 remote tunneld"
+            )
+        if _port_open(TUNNELD_PORT):
+            print("[+] tunneld ready")
+            return
+        await asyncio.sleep(0.5)
+    raise SystemExit("[!] tunneld never came up on :49151")
+
+
 async def amain():
+    proc = _ensure_tunneld_sync()
+    await wait_tunneld_ready(proc)
+
     RS["loop"] = asyncio.get_running_loop()
     RS["queue"] = asyncio.Queue()
     asyncio.create_task(gesture_worker(RS["queue"]))
@@ -768,7 +826,12 @@ async def amain():
 
     srv = http.server.ThreadingHTTPServer(("127.0.0.1", 9001), CmdHandler)
     print("[*] test pad: http://127.0.0.1:9001/")
-    await asyncio.get_running_loop().run_in_executor(None, srv.serve_forever)
+    try:
+        await asyncio.get_running_loop().run_in_executor(None, srv.serve_forever)
+    finally:
+        if tunneld_proc is not None and tunneld_proc.poll() is None:
+            print("[*] stopping tunneld we started")
+            tunneld_proc.terminate()
 
 
 if __name__ == "__main__":
