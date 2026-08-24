@@ -35,9 +35,13 @@ import requests
 
 from pymobiledevice3.remote.core_device.app_service import AppServiceService
 from pymobiledevice3.remote.core_device.hid_service import (
+    ASCII_TO_HID,
     HID_BUTTON_STATE_DOWN,
     HID_BUTTON_STATE_UP,
     IndigoHIDService,
+    KEY_BACKSPACE,
+    KEY_ENTER,
+    KEY_LEFT_SHIFT,
     TOUCHSCREEN_STATE_CONTACT,
     TOUCHSCREEN_STATE_RELEASE,
     touch_session,
@@ -468,50 +472,65 @@ def wda_dispatch(action, job):
             print(f"[!] unsupported wda key '{key}'")
 
 
-# ---- WDA writer: serializes calls, merges bursts -----------------------------
+# ---- input dispatch: HID keyboard first, WDA fallback ------------------------
 
 WDA_QUEUE = asyncio.Queue()
 
+_KEY_MAP = {"Backspace": KEY_BACKSPACE, "Enter": KEY_ENTER}
 
-async def _exec_wda(action, job):
-    try:
-        await asyncio.get_running_loop().run_in_executor(
-            None, wda_dispatch, action, job
-        )
-    except Exception as e:
-        print(f"[!] wda {action} failed: {e}")
+
+async def _hid_send_usages(codes):
+    hid, kbd = ACTION_CTX["hid"], ACTION_CTX["kbd_id"]
+    if hid is None or kbd is None:
+        return False
+    async with ACTION_CTX["send_lock"]:
+        await hid.send_keyboard(kbd, codes)
+    await asyncio.sleep(0.008)
+    async with ACTION_CTX["send_lock"]:
+        await hid.send_keyboard(kbd, set())
+    return True
+
+
+async def _hid_send_char(ch):
+    entry = ASCII_TO_HID.get(ch)
+    if entry is None:
+        return False
+    usage, shift = entry
+    codes = {usage} | ({KEY_LEFT_SHIFT} if shift else set())
+    return await _hid_send_usages(codes)
+
+
+async def _input_dispatch(job):
+    """HID path = hardware-speed keystrokes, zero HTTP. Anything the keyboard
+    surface can't handle (no session, unicode) falls back to WDA."""
+    action = str(job.get("action") or "")
+    if action == "type":
+        ch = str(job.get("text") or "")
+        if len(ch) == 1 and await _hid_send_char(ch):
+            return
+        await _exec_wda("type", job)
+        return
+    if action == "key":
+        usage = _KEY_MAP.get(str(job.get("key") or ""))
+        if usage is not None and await _hid_send_usages({usage}):
+            return
+        await _exec_wda("key", job)
+        return
+    await _exec_wda(action, job)
 
 
 async def wda_writer():
-    """Single consumer for WDA jobs. Slow typing executes per keystroke with
-    no added delay; when chars arrive faster than WDA answers, everything
-    queued at that moment merges into ONE type call (order preserved)."""
+    """Plain serial executor - no merging, no waiting. Each keystroke fires
+    immediately in arrival order."""
     while True:
         job = await WDA_QUEUE.get()
-        if job.get("action") != "type":
-            await _exec_wda(str(job.get("action")), job)
-            continue
-        texts = [str(job.get("text") or "")]
-        while True:
-            try:
-                nxt = WDA_QUEUE.get_nowait()
-            except asyncio.QueueEmpty:
-                break
-            if nxt.get("action") == "type":
-                texts.append(str(nxt.get("text") or ""))
-                continue
-            if any(texts):
-                await _exec_wda("type", {"text": "".join(texts)})
-                texts = []
-            await _exec_wda(str(nxt.get("action")), nxt)
-        if any(texts):
-            await _exec_wda("type", {"text": "".join(texts)})
+        await _input_dispatch(job)
 
 
 # ---- HTTP server with WS upgrade --------------------------------------------
 
 RS = {"loop": None, "queue": None}
-ACTION_CTX = {"indigo": None}
+ACTION_CTX = {"indigo": None, "hid": None, "kbd_id": None, "send_lock": None}
 
 # ---- installed-apps cache (CoreDevice appservice + iconservice) --------------
 ICON_CACHE_DIR = pathlib.Path.home() / ".cache" / "ius" / "icons"
@@ -736,9 +755,17 @@ async def gesture_worker(queue):
                 try:
                     async with touch_session(rsd) as hid:
                         print("[+] GESTURES LIVE")
+                        try:
+                            ACTION_CTX["kbd_id"] = await hid.create_keyboard_service()
+                            ACTION_CTX["hid"] = hid
+                            print(f"[+] virtual keyboard ready ({ACTION_CTX['kbd_id']:#x})")
+                        except Exception as e:
+                            print(f"[!] keyboard surface unavailable ({e}) - typing falls back to WDA")
                         await consume_and_stream(queue, hid)
                 finally:
                     ACTION_CTX["indigo"] = None
+                    ACTION_CTX["hid"] = None
+                    ACTION_CTX["kbd_id"] = None
         except Exception as e:
             print(f"[!] dropped ({e}) - retrying in 3s")
             await asyncio.sleep(3)
@@ -749,6 +776,7 @@ async def consume_and_stream(queue, hid):
     import time as _t
 
     send_lock = asyncio.Lock()
+    ACTION_CTX["send_lock"] = send_lock
     state = {"down": False, "x": norm(0.5), "y": norm(0.5)}
     lnx = None
     lny = None
