@@ -20,9 +20,7 @@ struct ProbeStatusView: View {
                 .font(.headline)
             Text("phase: \(phase)")
                 .font(.subheadline.monospaced())
-            Text("Streams run perpetually once you accept the picker.
-PC: python3 tools/stream_run.py --wda
-H.264: /stream.html - MJPEG: /stream")
+            Text("Streams run perpetually once you accept the picker.\nPC: python3 tools/stream_run.py --wda\nH.264: /stream.html  -  MJPEG: /stream")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
