@@ -58,6 +58,11 @@ final class ProbeOrchestrator {
         server.webSocketHandler = { conn, _ in
             H264Stream.shared.addWebSocket(conn)
         }
+        // Perpetual mode: begin streaming automatically shortly after launch.
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 1.0) { [weak self] in
+            self?.startCaptureOnly()
+        }
+
         NotificationCenter.default.addObserver(
             forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: nil
         ) { [weak self] _ in
@@ -97,6 +102,11 @@ final class ProbeOrchestrator {
             return (200, ["stopped": true])
         case ("GET", "/capture/status"):
             return (200, ["capturing": capturingOnly])
+        case ("GET", "/capture/stats"):
+            lock.lock(); let cap = capturingOnly; lock.unlock()
+            var out: [String: Any] = ["capturing": cap]
+            if cap { out["stats"] = capture.stats() }
+            return (200, out)
         case ("GET", "/probe/report"):
             lock.lock(); var out = report; out["phase"] = phase; lock.unlock()
             return (200, out)

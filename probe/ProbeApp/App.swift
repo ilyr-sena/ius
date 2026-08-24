@@ -20,7 +20,9 @@ struct ProbeStatusView: View {
                 .font(.headline)
             Text("phase: \(phase)")
                 .font(.subheadline.monospaced())
-            Text("Drive over USB:\npython3 tools/probe_run.py\n\nWatch live (on the computer):\nH.264: http://127.0.0.1:9100/stream.html\nMJPEG fallback: /stream?fps=15&scale=0.5&q=0.4\nTune it: /stream?fps=15&scale=0.5&q=0.4\n(last values become defaults) Swipe home at awaiting-background.")
+            Text("Streams run perpetually once you accept the picker.
+PC: python3 tools/stream_run.py --wda
+H.264: /stream.html - MJPEG: /stream")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
