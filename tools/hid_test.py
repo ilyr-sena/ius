@@ -230,6 +230,7 @@ class CmdHandler(http.server.BaseHTTPRequestHandler):
                 if op != 0x1:
                     return
                 txt = payload.decode(errors="replace")
+                print(f"[ws] <- {txt[:70]}")
                 try:
                     job = json.loads(txt)
                 except Exception:
@@ -297,10 +298,12 @@ async def consume_and_stream(queue, hid):
     contacted = True
 
     async def send_contact(x, y):
+        print(f"[hid] CONTACT ({x},{y})")
         async with SEND_LOCK:
             await hid.send_touchscreen(TOUCHSCREEN_STATE_CONTACT, x, y)
 
     async def send_release(x, y):
+        print(f"[hid] RELEASE ({x},{y})")
         async with SEND_LOCK:
             await hid.send_touchscreen(TOUCHSCREEN_STATE_RELEASE, x, y)
 
