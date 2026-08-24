@@ -282,24 +282,35 @@ async def consume_and_stream(queue, hid):
     """Finger state machine: desired position updated by websocket events;
     a 60 Hz loop streams CONTACT samples continuously while down - exactly
     like a real digitizer (constant cadence, zero velocity while still)."""
-    state = {"down": False, "x": 0, "y": 0}
+    state = {"down": False, "x": 0, "y": 0, "last_move_t": 0.0}
 
     async def consumer():
+        import time as _t
         while True:
             job = await queue.get()
             kind = job.get("kind")
+            now = _t.monotonic()
             if kind == "down":
                 state["x"] = norm(job["fx"])
                 state["y"] = norm(job["fy"])
                 state["down"] = True
+                state["last_move_t"] = now
             elif kind == "move":
                 state["x"] = norm(job["fx"])
                 state["y"] = norm(job["fy"])
+                state["last_move_t"] = now
             elif kind == "release":
                 state["down"] = False
                 x, y = norm(job["fx"]), norm(job["fy"])
+                still_for = now - state["last_move_t"]
+                if still_for >= 0.15:
+                    # explicit deceleration tail: tell iOS velocity hit zero
+                    for _ in range(6):
+                        await hid.send_touchscreen(
+                            TOUCHSCREEN_STATE_CONTACT, x, y)
+                        await asyncio.sleep(0.02)
                 await hid.send_touchscreen(TOUCHSCREEN_STATE_RELEASE, x, y)
-                print("[ius] finger up")
+                print(f"[ius] finger up (still {still_for*1000:.0f}ms before lift)")
 
     task = asyncio.create_task(consumer())
     try:
