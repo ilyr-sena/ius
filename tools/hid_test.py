@@ -315,16 +315,29 @@ async def consume_and_stream(queue, hid):
     task = asyncio.create_task(consumer())
     try:
         period = 1.0 / STREAM_HZ
-        tick = 0
+        last_sent = None
+        last_heartbeat = 0.0
         while True:
             await asyncio.sleep(period)
-            tick += 1
-            if state["down"]:
+            if not state["down"]:
+                continue
+            cur = (state["x"], state["y"])
+            now = _t.monotonic()
+
+            if cur != last_sent:
+                # position changed -> report immediately (minimal latency)
                 await hid.send_touchscreen(TOUCHSCREEN_STATE_CONTACT,
-                                           state["x"], state["y"])
+                                           cur[0], cur[1])
                 sent_count += 1
+                last_sent = cur
+                last_heartbeat = now
                 if sent_count % 30 == 1:
-                    print(f"[s] contact #{sent_count} @ {_t.monotonic():.3f}")
+                    print(f"[s] contact #{sent_count} @ {now:.3f}")
+            elif now - last_heartbeat > 0.25:
+                # stationary: light heartbeat keeps the contact fresh
+                await hid.send_touchscreen(TOUCHSCREEN_STATE_CONTACT,
+                                           cur[0], cur[1])
+                last_heartbeat = now
     finally:
         task.cancel()
         print(f"[s] streamer stopped, total contacts sent: {sent_count}")
