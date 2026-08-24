@@ -284,16 +284,17 @@ async def consume_and_stream(queue, hid):
     import time as _t
 
     SEND_LOCK = asyncio.Lock()
-    AUTO_LIFT_AFTER = 0.30       # seconds of stillness after ease-out -> lift
+    AUTO_LIFT_AFTER = 0.30
+    FLING_SPEED_MIN = 0.60        # frac/s - below this, stopping is just stopping
 
     state = {"down": False, "x": norm(0.5), "y": norm(0.5)}
-    lnx = None; lny = None
+    kin = {"lx": None, "ly": None, "lt": None, "vx": 0.0, "vy": 0.0}
     snx = 0.0; sny = 0.0
-    last_move_wall = 0.0
+    last_move_wall = None
     settling = False
     settled_done = False
     settled_at = 0.0
-    contacted = True             # tracks whether virtual finger is down
+    contacted = True
 
     async def send_contact(x, y):
         async with SEND_LOCK:
@@ -304,23 +305,35 @@ async def consume_and_stream(queue, hid):
             await hid.send_touchscreen(TOUCHSCREEN_STATE_RELEASE, x, y)
 
     async def consumer():
-        nonlocal lnx, lny, snx, sny, last_move_wall
+        nonlocal snx, sny, last_move_wall
         nonlocal settling, settled_done, settled_at, contacted
         while True:
             job = await queue.get()
             kind = job.get("kind")
+            t = _t.monotonic()
+
             if kind == "down":
-                state["x"] = norm(job["fx"])
-                state["y"] = norm(job["fy"])
+                kin["lx"], kin["ly"], kin["lt"] = job["fx"], job["fy"], t
+                kin["vx"] = kin["vy"] = 0.0
                 state["down"] = True
+                state["fx"], state["fy"] = job["fx"], job["fy"]
                 contacted = True
                 lnx = lny = None
                 snx = sny = 0.0
                 settling = False
                 settled_done = False
                 settled_at = 0.0
-                last_move_wall = _t.monotonic()
+                last_move_wall = t
+                await send_contact(state["x"], state["y"])
+
             elif kind == "move":
+                dt = t - kin["lt"] if kin["lt"] else 0.016
+                if dt <= 0: dt = 0.001
+                nvx = (job["fx"] - kin["lx"]) / dt
+                nvy = (job["fy"] - kin["ly"]) / dt
+                kin["vx"] = 0.65 * kin["vx"] + 0.35 * nvx
+                kin["vy"] = 0.65 * kin["vy"] + 0.35 * nvy
+                kin["lx"], kin["ly"], kin["lt"] = job["fx"], job["fy"], t
                 state["x"] = norm(job["fx"])
                 state["y"] = norm(job["fy"])
                 nx = norm(job["fx"]); ny = norm(job["fy"])
@@ -330,14 +343,13 @@ async def consume_and_stream(queue, hid):
                         snx, sny = ddx, ddy
                 lnx, lny = nx, ny
                 settling = False
-                last_move_wall = _t.monotonic()
+                last_move_wall = t
+
             elif kind == "release":
-                state["down"] = False
-                state["x"] = norm(job["fx"])
-                state["y"] = norm(job["fy"])
-                if contacted:
-                    await send_release(state["x"], state["y"])
-                    contacted = False
+                state["down"] = False                   # stops streamer+easeout
+                x = norm(job["fx"]); y = norm(job["fy"])
+                state["x"], state["y"] = x, y
+                await send_release(x, y)
                 print("[ius] finger up")
 
     task = asyncio.create_task(consumer())
@@ -345,37 +357,32 @@ async def consume_and_stream(queue, hid):
         period = 1.0 / STREAM_HZ
         while True:
             await asyncio.sleep(period)
-            now = _t.monotonic()
             if not state["down"]:
                 continue
+            now = _t.monotonic()
 
             recent_move = (now - last_move_wall) < 0.12
+            speed = (kin["vx"]**2 + kin["vy"]**2) ** 0.5
 
             if recent_move:
                 settling = False
-                if not contacted:
-                    contacted = True
-                    await send_contact(state["x"], state["y"])
                 jx = max(0, min(65535, state["x"] + random.randint(-2, 2)))
                 jy = max(0, min(65535, state["y"] + random.randint(-2, 2)))
                 await send_contact(jx, jy)
-            elif settling or settled_done:
-                # eased out and frozen: auto-lift after grace period
-                if contacted and settled_done and (now - settled_at) > AUTO_LIFT_AFTER:
-                    await send_release(state["x"], state["y"])
-                    contacted = False
-                    print("[ius] auto-lifted (cursor frozen past grace)")
-                elif contacted:
-                    jx = max(0, min(65535, state["x"] + random.randint(-1, 1)))
-                    jy = max(0, min(65535, state["y"] + random.randint(-1, 1)))
-                    await send_contact(jx, jy)
-            else:
-                # cursor just froze mid-gesture: directional ease-out first
+                continue
+
+            # cursor froze: decide based on how fast the finger was moving
+            if not settled_done and speed >= FLING_SPEED_MIN and \
+                    (abs(snx) + abs(sny)) > 60:
+                # FAST swipe froze: ease-out to bleed the fling off, then
+                # auto-lift so no phantom swipe fires on button release
                 settling = True
-                print("[ius] cursor froze - easing out...")
+                print("[ius] fast swipe froze - easing out...")
                 gx = float(state["x"]); gy = float(state["y"])
                 sxg = snx * 0.30; syg = sny * 0.30
                 for _i in range(14):
+                    if not state["down"]:
+                        break                           # released mid-ease
                     await asyncio.sleep(0.016)
                     gx += sxg; gy += syg
                     sxg *= 0.70; syg *= 0.70
@@ -385,6 +392,20 @@ async def consume_and_stream(queue, hid):
                 state["y"] = int(min(65535, max(0, gy)))
                 settled_done = True
                 settled_at = _t.monotonic()
+            elif not settled_done:
+                # SLOW swipe froze: low velocity, no fling risk -> simply
+                # hold the contact still; lifting will be a clean stop
+                pass
+
+            if settling and settled_done:
+                if (now - settled_at) > AUTO_LIFT_AFTER:
+                    await send_release(state["x"], state["y"])
+                    contacted = False
+                    print("[ius] auto-lifted after settle")
+            else:
+                jx = max(0, min(65535, state["x"] + random.randint(-1, 1)))
+                jy = max(0, min(65535, state["y"] + random.randint(-1, 1)))
+                await send_contact(jx, jy)
     finally:
         task.cancel()
         print("[s] streamer stopped")
