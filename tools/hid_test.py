@@ -279,38 +279,83 @@ async def gesture_worker(queue):
 
 
 async def consume_and_stream(queue, hid):
-    """Finger state machine: desired position updated by websocket events;
-    a 60 Hz loop streams CONTACT samples continuously while down - exactly
-    like a real digitizer (constant cadence, zero velocity while still)."""
-    state = {"down": False, "x": 0, "y": 0, "last_move_t": 0.0}
+    """Finger model with true physics:
+      - desired position updated live by websocket events
+      - 60 Hz CONTACT streamer while finger is down (constant cadence)
+      - finger velocity tracked with EMA; on release, a short exponentially-
+        decaying glide is emitted ONLY if the finger was moving - mimicking
+        a real lift. Freezing the cursor bleeds velocity off naturally."""
+    state = {"down": False, "fx": None, "fy": None}
+
+    class Kin:
+        lx = None; ly = None; lt = None
+        vx = 0.0;  vy = 0.0
+        lt_release_check = None
+
+    kin = Kin()
 
     async def consumer():
         import time as _t
         while True:
             job = await queue.get()
             kind = job.get("kind")
-            now = _t.monotonic()
+            t = _t.monotonic()
+
             if kind == "down":
-                state["x"] = norm(job["fx"])
-                state["y"] = norm(job["fy"])
+                kin.lx, kin.ly, kin.lt = job["fx"], job["fy"], t
+                kin.vx = kin.vy = 0.0
                 state["down"] = True
-                state["last_move_t"] = now
+                state["fx"], state["fy"] = job["fx"], job["fy"]
+
             elif kind == "move":
-                state["x"] = norm(job["fx"])
-                state["y"] = norm(job["fy"])
-                state["last_move_t"] = now
+                if kin.lt is None:
+                    kin.lx, kin.ly, kin.lt = job["fx"], job["fy"], t
+                    continue
+                dt = t - kin.lt
+                if dt <= 0:
+                    continue
+                nvx = (job["fx"] - kin.lx) / dt
+                nvy = (job["fy"] - kin.ly) / dt
+                kin.vx = 0.65 * kin.vx + 0.35 * nvx     # smoothed velocity
+                kin.vy = 0.65 * kin.vy + 0.35 * nvy
+                kin.lx, kin.ly, kin.lt = job["fx"], job["fy"], t
+                state["fx"], state["fy"] = job["fx"], job["fy"]
+
             elif kind == "release":
-                state["down"] = False
-                x, y = norm(job["fx"]), norm(job["fy"])
-                still_for = now - state["last_move_t"]
-                if still_for >= 0.15:
-                    # explicit deceleration tail: tell iOS velocity hit zero
-                    for _ in range(6):
-                        await hid.send_touchscreen(
-                            TOUCHSCREEN_STATE_CONTACT, x, y)
-                        await asyncio.sleep(0.02)
-                await hid.send_touchscreen(TOUCHSCREEN_STATE_RELEASE, x, y)
-                print(f"[ius] finger up (still {still_for*1000:.0f}ms before lift)")
+                state["down"] = False                   # stop the 60Hz streamer
+                fx = state["fx"] if state["fx"] is not None else job["fx"]
+                fy = state["fy"] if state["fy"] is not None else job["fy"]
+
+                # effective velocity at lift, decayed across any cursor freeze
+                freeze = t - (kin.lt or t)
+                decay = 0.82 ** max(0.0, freeze / 0.015)
+                vx = kin.vx * decay
+                vy = kin.vy * decay
+
+                speed = (vx*vx + vy*vy) ** 0.5
+                if speed < 0.05:
+                    await hid.send_touchscreen(
+                        TOUCHSCREEN_STATE_RELEASE,
+                        norm(fx), norm(fy))
+                    print("[ius] finger up (no momentum)")
+                    continue
+
+                # glide: continue motion with exponential deceleration
+                print(f"[ius] momentum glide (v={speed:.2f} frac/s)")
+                fx_g, fy_g = fx, fy
+                for _ in range(14):
+                    await asyncio.sleep(0.014)
+                    vx *= 0.80; vy *= 0.80
+                    fx_g = min(1, max(0, fx_g + vx * 0.014))
+                    fy_g = min(1, max(0, fy_g + vy * 0.014))
+                    await hid.send_touchscreen(
+                        TOUCHSCREEN_STATE_CONTACT,
+                        norm(fx_g), norm(fy_g))
+                    if abs(vx) + abs(vy) < 0.01:
+                        break
+                await hid.send_touchscreen(TOUCHSCREEN_STATE_RELEASE,
+                                           norm(fx_g), norm(fy_g))
+                print("[ius] finger up (with momentum)")
 
     task = asyncio.create_task(consumer())
     try:
@@ -319,7 +364,7 @@ async def consume_and_stream(queue, hid):
             await asyncio.sleep(period)
             if state["down"]:
                 await hid.send_touchscreen(TOUCHSCREEN_STATE_CONTACT,
-                                           state["x"], state["y"])
+                                           norm(state["fx"]), norm(state["fy"]))
     finally:
         task.cancel()
 
