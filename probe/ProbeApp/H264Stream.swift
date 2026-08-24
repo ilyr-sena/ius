@@ -167,6 +167,7 @@ final class H264Stream {
     private var initSegment: Data?
     private var seq: UInt32 = 0
     private var lastTicks: Int64?
+    private var baseTicks: Int64?
     private var pendingForceKeyFrame = false
     private var endingSession = false
 
@@ -280,6 +281,7 @@ final class H264Stream {
         avcC = nil
         initSegment = nil
         lastTicks = nil
+        baseTicks = nil
         seq = 0
         endingSession = false
         lock.unlock()
@@ -341,7 +343,11 @@ final class H264Stream {
         }
 
         let pts = CMSampleBufferGetOutputPresentationTimeStamp(sampleBuffer)
-        let ticks = Int64((CMTimeGetSeconds(pts) * 60000.0).rounded())
+        let absTicks = Int64((CMTimeGetSeconds(pts) * 60000.0).rounded())
+        lock.lock()
+        if baseTicks == nil { baseTicks = absTicks }
+        let ticks = absTicks - (baseTicks ?? absTicks)
+        lock.unlock()
         let isSync = dependsOnOthersFalse(sampleBuffer)
 
         lock.lock()
