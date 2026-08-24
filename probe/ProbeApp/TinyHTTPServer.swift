@@ -237,7 +237,7 @@ final class WebSocketConn {
             case 0x9:                       // ping -> pong
                 enqueue(opcode: 0xA, payload: payload)
             default:
-                break                       // client messages ignored
+                onMessage?(opcode == 0x1, payload)
             }
         }
     }

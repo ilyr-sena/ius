@@ -182,6 +182,15 @@ final class H264Stream {
         let ws = WebSocketConn(conn: conn) { [weak self] in
             self?.remove(conn)
         }
+        ws.onMessage = { isText, data in
+            guard isText,
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  obj["kind"] != nil else { return }
+            let reply = WdaRelay.shared.handle(message: obj)
+            if let replyData = try? JSONSerialization.data(withJSONObject: reply) {
+                ws.enqueue(opcode: 0x1, payload: replyData)
+            }
+        }
         lock.lock()
         clients.append(Client(ws: ws, joined: false))
         let n = clients.count
@@ -491,6 +500,55 @@ ws.onmessage = (e) => {
 };
 
 function opened_flag(){ return msb !== null; }
+
+// ---- remote control: mouse -> WDA actions ---------------------------------
+let dragging = false; let moved = false; let sx = 0, sy = 0;
+const pressT0 = performance.now();
+
+function mapXY(ev){
+  const r = v.getBoundingClientRect();
+  const vw = v.videoWidth || 1, vh = v.videoHeight || 1;
+  const sc = Math.min(r.width / vw, r.height / vh);
+  const dw = vw * sc, dh = vh * sc;
+  const ox = r.left + (r.width - dw) / 2;
+  const oy = r.top + (r.height - dh) / 2;
+  return [Math.round((ev.clientX - ox) / sc), Math.round((ev.clientY - oy) / sc)];
+}
+function moveAct(x, y, dur){ return {type:"pointerMove", x:Math.round(x), y:Math.round(y), duration:dur||0}; }
+function downAct(){ return {type:"pointerDown", button:0}; }
+function upAct(){ return {type:"pointerUp", button:0}; }
+
+v.addEventListener('mousedown', ev => {
+  [sx, sy] = mapXY(ev);
+  dragging = true; moved = false;
+});
+window.addEventListener('mousemove', ev => {
+  if (!dragging) return;
+  const [x, y] = mapXY(ev);
+  if (Math.hypot(x - sx, y - sy) > 8) moved = true;
+});
+window.addEventListener('mouseup', ev => {
+  if (!dragging) return;
+  dragging = false;
+  const [ex, ey] = mapXY(ev);
+  const held = Math.round(performance.now() - pressT0);
+  let acts;
+  if (!moved) {
+    acts = [moveAct(sx, sy), downAct(),
+            {type:"pause", duration: Math.min(700, Math.max(60, held))},
+            upAct()];
+  } else {
+    const steps = 24;
+    acts = [moveAct(sx, sy), downAct()];
+    for (let i = 1; i < steps; i++)
+      acts.push(moveAct(sx + (ex-sx)*i/steps, sy + (ey-sy)*i/steps,
+                        Math.max(4, Math.round(320/steps))));
+    acts.push(moveAct(ex, ey, 30));
+    acts.push(upAct());
+  }
+  ws.send(JSON.stringify({kind:"actions", wait:true, actions:acts}));
+  setStatus('sent ' + (moved ? 'swipe' : 'tap') + ' (' + ex + ',' + ey + ')');
+});
 
 setInterval(() => { pump(); trim(); live(); }, 500);
 </script>
