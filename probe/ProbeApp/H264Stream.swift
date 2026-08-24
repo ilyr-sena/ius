@@ -192,12 +192,17 @@ final class H264Stream {
     }
 
     private func remove(_ conn: NWConnection) {
-        lock.lock()
-        clients.removeAll { $0.ws.conn === conn }
-        let n = clients.count
-        lock.unlock()
-        print("[ius] h264 viewer disconnected (\(n) total)")
-        if n == 0 { endSession() }
+        DispatchQueue.global().async { [weak self] in
+            guard let self else { return }
+            self.lock.lock()
+            if let i = self.clients.firstIndex(where: { $0.ws.conn === conn }) {
+                self.clients.remove(at: i)
+            }
+            let n = self.clients.count
+            self.lock.unlock()
+            print("[ius] h264 viewer disconnected (\(n) total)")
+            if n == 0 { self.endSession() }
+        }
     }
 
     // ---- encoding ----------------------------------------------------------
@@ -367,24 +372,40 @@ final class H264Stream {
         let curSeq = seq
         let initSeg = initSegment
 
-        // send while holding the lock: preserves per-viewer ordering
+        // Snapshot targets under lock; enqueue OUTSIDE the lock.
+        // (An overflowing viewer triggers close()->remove() which re-enters
+        // this lock - holding it during enqueues would deadlock.)
         let codecStr = MP4.codecString(avcC: newAvcC) ?? "avc1.640028"
         let frag = MP4.buildFragment(seq: curSeq, duration: duration,
                                      sampleSize: size, isSync: isSync,
                                      payload: payload)
+        let initSegSnapshot = initSegment
 
+        var targets: [(WebSocketConn, Bool)] = []
         for i in clients.indices {
-            if !clients[i].joined {
-                guard isSync else { continue }          // late joiner waits for IDR
-                clients[i].ws.sendText("{\"codec\":\"\(codecStr)\"}")
-                if let seg = initSegment { clients[i].ws.sendBinary(seg) }
-                clients[i].joined = true
-                print("[ius] h264 viewer joined stream")
-            }
-            clients[i].ws.sendBinary(frag)
+            targets.append((clients[i].ws, !clients[i].joined))
+            if !clients[i].joined { clients[i].joined = true }
         }
         lock.unlock()
+
+        var joinedCount = 0
+        for (ws, newlyJoined) in targets {
+            if newlyJoined {
+                guard isSync else { continue }          // late joiner waits for IDR
+                ws.enqueue(opcode: 0x1,
+                    payload: Data("{\"codec\":\"\(codecStr)\"}".utf8))
+                if let seg = initSegSnapshot { ws.enqueue(payload: seg) }
+                joinedCount += 1
+                print("[ius] h264 viewer joined stream")
+            }
+            ws.enqueue(payload: frag)
+        }
+        if joinedCount > 0 { print("[ius] joined count: \(joinedCount)") }
     }
+}
+
+extension H264Stream {
+    fileprivate func handleEncodedWithSync(sampleBuffer: CMSampleBuffer) {}
 }
 
 extension H264Stream {
