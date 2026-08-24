@@ -183,28 +183,31 @@ async def run_job(hid, indigo, job):
 
 
 async def gesture_worker(queue):
+    from pymobiledevice3.tunneld.api import get_tunneld_devices
+
+    tunneld = ("127.0.0.1", 49151)
     while True:
+        rsd = None
         try:
-            services = await get_remote_pairing_tunnel_services(udid=UDID)
-            if not services:
-                print("[!] phone not visible - retrying")
+            rsds = await get_tunneld_devices(tunneld)
+            rsd = next((r for r in rsds if r.udid == UDID), None)
+            if rsd is None:
+                print("[!] tunneld has no matching device - retrying")
                 await asyncio.sleep(3)
                 continue
-            rp = services[0]
-            async with start_tunnel_over_remotepairing(rp) as tun:
-                rsd = RemoteServiceDiscoveryService((tun.address, tun.port))
-                async with rsd:
-                    print("[+] tunnel up")
-                    indigo = IndigoHIDService(rsd)
-                    async with indigo as ibtn:
-                        async with touch_session(rsd) as hid:
-                            print("[+] HID gestures live")
-                            while True:
-                                job = await queue.get()
-                                try:
-                                    await run_job(hid, ibtn, job)
-                                except Exception as e:
-                                    print(f"[!] gesture error: {e}")
+            print(f"[+] device via tunneld ({rsd.udid})")
+
+            indigo = IndigoHIDService(rsd)
+            async with indigo as ibtn:
+                print("[+] button channel armed")
+                async with touch_session(rsd) as hid:
+                    print("[+] touch stream authenticated - GESTURES LIVE")
+                    while True:
+                        job = await queue.get()
+                        try:
+                            await run_job(hid, ibtn, job)
+                        except Exception as e:
+                            print(f"[!] gesture error: {e}")
         except Exception as e:
             print(f"[!] dropped ({e}) - retrying in 3s")
             await asyncio.sleep(3)
