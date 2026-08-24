@@ -141,9 +141,6 @@ final class MJPEGStreamer {
         // Retain the pixel buffer synchronously; heavy work off the SCK callback.
         let ci = CIImage(cvPixelBuffer: CMSampleBufferGetImageBuffer(sampleBuffer)!)
 
-        // Slight softening to reduce harsh pixel-perfect rendering; improves text readability.
-        let softened = ci.applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: 0.6])
-
         DispatchQueue.global().async { [weak self] in
             guard let self else { return }
             defer {
@@ -164,10 +161,18 @@ final class MJPEGStreamer {
                     self.lock.lock(); self.lastSent[key] = now; self.lock.unlock()
                 }
 
-                var scaled = softened
+                var scaled = ci
                 if group.cfg.scale < 1 {
-                    scaled = softened.transformed(by: CGAffineTransform(scaleX: group.cfg.scale,
-                                                                        y: group.cfg.scale))
+                    // Proper anti-aliased downscale (windowed-sinc) — replaces the
+                    // old affine transform + Gaussian pre-blur hack.
+                    scaled = ci.applyingFilter("CILanczosScaleTransform", parameters: [
+                        kCIInputScaleKey: group.cfg.scale
+                    ])
+                    // Restore edge snap lost to resampling so text stays readable.
+                    scaled = scaled.applyingFilter("CIUnsharpMask", parameters: [
+                        kCIInputRadiusKey: 0.5,
+                        kCIInputIntensityKey: 0.3,
+                    ])
                 }
                 guard let cg = self.ciContext.createCGImage(scaled, from: scaled.extent),
                       let data = UIImage(cgImage: cg).jpegData(compressionQuality: group.cfg.quality) else { continue }
