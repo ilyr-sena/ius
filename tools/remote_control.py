@@ -71,12 +71,15 @@ const mv = (x,y,d)=>({type:'pointerMove', x:Math.round(x), y:Math.round(y),
                       duration:d||0, origin:'viewport'});
 const dn = ()=>({type:'pointerDown', button:0});
 const up = ()=>({type:'pointerUp', button:0});
-const SRC = [{type:'pointer', id:'ius-finger', parameters:{pointerType:'touch'}}];
 
 async function sendActions(acts){
   if (!await ensureSession()) return;
-  const [code, j] = await api('POST', '/session/' + sid + '/actions',
-                                 {actions: [...SRC, ...acts]});
+  const payload = {actions: [{
+    type: 'pointer', id: 'ius-finger',
+    parameters: {pointerType: 'touch'},
+    actions: acts
+  }]};
+  const [code, j] = await api('POST', '/session/' + sid + '/actions', payload);
   setStatus((code >= 200 && code < 300 ? 'ok' : 'http ' + code) + ': ' +
             acts.length + ' steps');
 }
