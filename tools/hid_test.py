@@ -6,13 +6,15 @@ Open:  http://127.0.0.1:9001/
 """
 import asyncio
 import base64
-import random
 import hashlib
 import http.server
 import json
+import pathlib
 import socket
 import threading
+import urllib.parse
 
+from pymobiledevice3.remote.core_device.app_service import AppServiceService
 from pymobiledevice3.remote.core_device.hid_service import (
     HID_BUTTON_STATE_DOWN,
     HID_BUTTON_STATE_UP,
@@ -21,6 +23,7 @@ from pymobiledevice3.remote.core_device.hid_service import (
     TOUCHSCREEN_STATE_RELEASE,
     touch_session,
 )
+from pymobiledevice3.remote.core_device.icon_service import IconService
 from pymobiledevice3.remote.remote_service_discovery import (
     RemoteServiceDiscoveryService,
 )
@@ -198,10 +201,68 @@ def read_ws_frames(sock, ws, on_message):
         pass
 
 
+# ---- installed apps / icons over tunneld ------------------------------------
+
+async def _rsd_for_device():
+    rsds = await get_tunneld_devices(("127.0.0.1", 49151))
+    rsd = next((r for r in rsds if r.udid == UDID), None)
+    if rsd is None:
+        raise RuntimeError("tunneld has no matching device")
+    return rsd
+
+
+async def _fetch_apps_async():
+    """Installed, user-visible apps: User apps first (A-Z), then stock/System."""
+    rsd = await _rsd_for_device()
+    async with AppServiceService(rsd) as svc:
+        raw = await svc.list_apps(
+            include_app_clips=False,
+            include_removable_apps=True,
+            include_hidden_apps=False,
+            include_internal_apps=False,
+            include_default_apps=True,
+        )
+    out, seen = [], set()
+    for a in raw:
+        bid = a.get("bundleIdentifier") or a.get("CFBundleIdentifier")
+        if not bid or bid in seen:
+            continue
+        name = str(a.get("displayName") or a.get("name") or "").strip()
+        kind = str(a.get("applicationType") or "").lower()
+        # daemons have no display name; skip anything we can't label
+        if not name:
+            continue
+        out.append({"bundleId": bid, "name": name, "user": kind == "user"})
+        seen.add(bid)
+    out.sort(key=lambda e: (0 if e.pop("user") else 1, e["name"].lower()))
+    print(f"[+] app list: {len(out)} apps")
+    return out
+
+
+async def _fetch_icon_async(bundle_id):
+    rsd = await _rsd_for_device()
+    async with IconService(rsd) as svc:
+        icon = await svc.fetch_icon(
+            bundle_identifier=bundle_id, width=90.0, height=90.0, scale=2.0
+        )
+    return icon.png_data
+
+
+def run_on_loop(coro, timeout=90):
+    """Run an async pymobiledevice3 call from the HTTP thread pool."""
+    return asyncio.run_coroutine_threadsafe(coro, RS["loop"]).result(timeout)
+
+
 # ---- HTTP server with WS upgrade --------------------------------------------
 
 RS = {"loop": None, "queue": None}
 ACTION_CTX = {"indigo": None}
+
+# ---- installed-apps cache (CoreDevice appservice + iconservice) --------------
+ICON_CACHE_DIR = pathlib.Path.home() / ".cache" / "ius" / "icons"
+APPS_LOCK = threading.Lock()
+APPS_STATE = {"list": None}      # [{"bundleId","name"}] once warmed
+ICON_MEM = {}                    # bundleId -> png bytes
 
 # Named iOS hardware buttons -> (usage_page, usage_code, hold_seconds).
 # Mirrors pymobiledevice3's own `developer core-device hid button` mapping:
@@ -220,8 +281,61 @@ NAMED_BUTTONS = {
 class CmdHandler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
+    def _json_response(self, code, obj):
+        body = json.dumps(obj).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_GET(self):
         path = self.path.split("?")[0]
+        if path == "/apps.json":
+            refresh = "refresh=1" in self.path
+            with APPS_LOCK:
+                need = refresh or APPS_STATE["list"] is None
+            if need:
+                try:
+                    lst = run_on_loop(_fetch_apps_async())
+                except Exception as e:
+                    self._json_response(502, {"error": f"app list unavailable: {e}"})
+                    return
+                with APPS_LOCK:
+                    APPS_STATE["list"] = lst
+            with APPS_LOCK:
+                lst = APPS_STATE["list"] or []
+            self._json_response(200, {"apps": lst})
+            return
+
+        if path.startswith("/icon/") and path.endswith(".png"):
+            bid = urllib.parse.unquote(path[len("/icon/"):-len(".png")])
+            data = ICON_MEM.get(bid)
+            if data is None:
+                safe = bid.replace("/", "_")
+                disk = ICON_CACHE_DIR / f"{safe}.png"
+                if disk.is_file():
+                    data = disk.read_bytes()
+                else:
+                    try:
+                        data = run_on_loop(_fetch_icon_async(bid))
+                    except Exception:
+                        self.send_error(404)
+                        return
+                    disk.parent.mkdir(parents=True, exist_ok=True)
+                    disk.write_bytes(data)
+                ICON_MEM[bid] = data
+            body = data
+            self.send_response(200)
+            self.send_header("Content-Type", "image/png")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Cache-Control", "public, max-age=86400")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
         if path in ("/", "/index.html"):
             body = PAGE.encode()
             self.send_response(200)
@@ -420,6 +534,18 @@ async def amain():
     RS["loop"] = asyncio.get_running_loop()
     RS["queue"] = asyncio.Queue()
     asyncio.create_task(gesture_worker(RS["queue"]))
+
+    async def warm_apps():
+        await asyncio.sleep(1.5)
+        try:
+            lst = await _fetch_apps_async()
+        except Exception as e:
+            print(f"[!] app list warmup failed: {e}")
+            return
+        with APPS_LOCK:
+            APPS_STATE["list"] = lst
+
+    asyncio.create_task(warm_apps())
 
     srv = http.server.ThreadingHTTPServer(("127.0.0.1", 9001), CmdHandler)
     print("[*] test pad: http://127.0.0.1:9001/")
