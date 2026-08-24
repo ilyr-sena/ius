@@ -188,7 +188,6 @@ final class H264Stream {
         if needForce { pendingForceKeyFrame = true }
         lock.unlock()
         print("[ius] h264 viewer connected (\(n) total)")
-        ws.sendText("{\"ok\":true}")
     }
 
     private func remove(_ conn: NWConnection) {
@@ -405,6 +404,7 @@ let gotCodec = false, bytesIn = 0;
 ws.onmessage = (e) => {
   if (typeof e.data === 'string') {
     const j = JSON.parse(e.data);
+    if (!j.codec) { console.log('ignoring', j); return; }
     gotCodec = true;
     st.textContent = 'codec ' + j.codec + ' - opening MSE';
     msb = new MediaSource();
