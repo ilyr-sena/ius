@@ -399,9 +399,37 @@ def _wda_session_id():
                           json={"capabilities": {}}, timeout=8)
         r.raise_for_status()
         sid = r.json()["value"]["sessionId"]
+        # Don't let WDA wait for app-idle on every request — animations can
+        # stall each keystroke by seconds.
+        try:
+            requests.post(
+                f"{WDA_BASE}/session/{sid}/appium/settings",
+                json={"settings": {"waitForIdleTimeout": 0}}, timeout=8)
+        except Exception as e:
+            print(f"[!] wda settings tweak failed (non-fatal): {e}")
         WDA_STATE["session"] = sid
         print(f"[+] wda session {sid}")
         return sid
+
+
+def _wda_presskey(name):
+    _wda_post_inner("/wda/presskey", {"key": name})
+
+
+def _wda_delete_backward():
+    """Real text deletion: target the active element and send the WebDriver
+    BACK_SPACE code, which WDA translates into a keyboard delete. The
+    hardware-event `presskey delete` does nothing for on-screen keyboards."""
+    sid = _wda_session_id()
+    r = requests.get(f"{WDA_BASE}/session/{sid}/wda/activeElementInfo",
+                     timeout=8)
+    r.raise_for_status()
+    el = r.json().get("value") or {}
+    eid = el.get("ELEMENT") or el.get("wdaElement")
+    if not eid:
+        raise RuntimeError(f"no active element (got keys {list(el)})")
+    _wda_post_inner(f"/element/{eid}/value",
+                    {"value": ["\uE003"], "text": "\uE003"})
 
 
 def _wda_post(path, payload):
@@ -440,12 +468,23 @@ def wda_dispatch(action, job):
         print(f"[ius] wda type: {text!r}")
     elif action == "key":
         key = str(job.get("key") or "")
-        name = {"Enter": "return", "Backspace": "delete"}.get(key)
-        if name is None:
+        if key == "Backspace":
+            try:
+                _wda_delete_backward()
+            except Exception as e:
+                print(f"[!] element delete failed ({e}) - trying presskey")
+                for name in ("backspace", "delete"):
+                    try:
+                        _wda_presskey(name)
+                        break
+                    except Exception:
+                        continue
+            print("[ius] wda key: backspace")
+        elif key == "Enter":
+            _wda_presskey("return")
+            print("[ius] wda key: return")
+        else:
             print(f"[!] unsupported wda key '{key}'")
-            return
-        _wda_post("/wda/presskey", {"key": name})
-        print(f"[ius] wda key: {name}")
 
 
 # ---- HTTP server with WS upgrade --------------------------------------------
