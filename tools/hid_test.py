@@ -20,6 +20,17 @@ import sys
 import threading
 import urllib.parse
 
+# Launched via sudo by mistake? Drop back to the invoking user and restart.
+# Only the spawned tunneld child needs root — running everything as root
+# hides the user site-packages (pymobiledevice3) and breaks imports.
+if os.name == "posix" and os.geteuid() == 0 and os.environ.get("SUDO_USER"):
+    import pwd
+    _pw = pwd.getpwnam(os.environ["SUDO_USER"])
+    os.environ["HOME"] = _pw.pw_dir
+    os.initgroups(_pw.pw_name, _pw.pw_gid)
+    os.setuid(_pw.pw_uid)
+    os.execv(sys.executable, [sys.executable] + sys.argv)
+
 import requests
 
 from pymobiledevice3.remote.core_device.app_service import AppServiceService
