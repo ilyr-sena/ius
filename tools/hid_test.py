@@ -325,37 +325,29 @@ async def consume_and_stream(queue, hid):
                 state["down"] = False                   # stop the 60Hz streamer
                 fx = state["fx"] if state["fx"] is not None else job["fx"]
                 fy = state["fy"] if state["fy"] is not None else job["fy"]
+                x, y = norm(fx), norm(fy)
 
-                # effective velocity at lift, decayed across any cursor freeze
                 freeze = t - (kin.lt or t)
                 decay = 0.82 ** max(0.0, freeze / 0.015)
                 vx = kin.vx * decay
                 vy = kin.vy * decay
-
                 speed = (vx*vx + vy*vy) ** 0.5
-                if speed < 0.05:
-                    await hid.send_touchscreen(
-                        TOUCHSCREEN_STATE_RELEASE,
-                        norm(fx), norm(fy))
-                    print("[ius] finger up (no momentum)")
+
+                if freeze < 0.15 or speed < 0.05:
+                    # genuine flick or already-stopped: lift right here and
+                    # let iOS read the real sample history for momentum
+                    await hid.send_touchscreen(TOUCHSCREEN_STATE_RELEASE, x, y)
+                    print("[ius] finger up")
                     continue
 
-                # glide: continue motion with exponential deceleration
-                print(f"[ius] momentum glide (v={speed:.2f} frac/s)")
-                fx_g, fy_g = fx, fy
-                for _ in range(14):
-                    await asyncio.sleep(0.014)
-                    vx *= 0.80; vy *= 0.80
-                    fx_g = min(1, max(0, fx_g + vx * 0.014))
-                    fy_g = min(1, max(0, fy_g + vy * 0.014))
-                    await hid.send_touchscreen(
-                        TOUCHSCREEN_STATE_CONTACT,
-                        norm(fx_g), norm(fy_g))
-                    if abs(vx) + abs(vy) < 0.01:
-                        break
-                await hid.send_touchscreen(TOUCHSCREEN_STATE_RELEASE,
-                                           norm(fx_g), norm(fy_g))
-                print("[ius] finger up (with momentum)")
+                # cursor froze >=150ms mid-gesture: bleed off the phantom
+                # fling with a few stationary samples, then lift in place
+                print("[ius] post-freeze stop - settling before lift")
+                for _ in range(6):
+                    await asyncio.sleep(0.02)
+                    await hid.send_touchscreen(TOUCHSCREEN_STATE_CONTACT, x, y)
+                await hid.send_touchscreen(TOUCHSCREEN_STATE_RELEASE, x, y)
+                print("[ius] finger up (stopped in place)")
 
     task = asyncio.create_task(consumer())
     try:
