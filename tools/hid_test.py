@@ -32,7 +32,7 @@ PAGE = """<!doctype html>
 <html><head><meta charset="utf-8"><title>HID test pad</title>
 <style>
  body{background:#111;color:#ddd;font-family:ui-monospace,monospace;margin:0;padding:14px}
- #pad{position:relative;width:82vw;height:68vh;border:2px solid #4af;background:#16161d;
+ #pad{position:relative;height:min(84vh,860px);aspect-ratio:390/844;max-width:94vw;border:2px solid #4af;background:#16161d;
       cursor:crosshair;overflow:hidden;touch-action:none}
  .dot{position:absolute;width:10px;height:10px;margin:-5px;border-radius:50%;
       background:#4af;opacity:.85;pointer-events:none}
