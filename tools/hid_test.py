@@ -784,17 +784,19 @@ def _ensure_tunneld_sync():
     if _port_open(TUNNELD_PORT):
         print("[*] tunneld already running")
         return None
-    # pymobiledevice3 lives in the user's site-packages; root can't see it,
-    # so hand our PYTHONPATH through sudo explicitly.
-    user_site = os.path.expanduser(
-        "~/.local/lib/python{}.{}".format(*sys.version_info[:2])
+    # pymobiledevice3 lives in the user's site-packages; root can't see it.
+    # Wrap in `sh -c` so PYTHONPATH is part of the command text — sudo's env
+    # policy can't strip it from there.
+    import shlex
+    import site
+    user_site = site.getusersitepackages()
+    inner = (
+        f"PYTHONPATH={shlex.quote(user_site)} "
+        f"exec {shlex.quote(sys.executable)} "
+        f"-m pymobiledevice3 remote tunneld"
     )
-    env_arg = f"PYTHONPATH={user_site}"
-    print("[*] starting tunneld (sudo password prompt may appear)...")
-    proc = subprocess.Popen(
-        ["sudo", env_arg, sys.executable,
-         "-m", "pymobiledevice3", "remote", "tunneld"]
-    )
+    print(f"[*] starting tunneld via sudo (PYTHONPATH={user_site})...")
+    proc = subprocess.Popen(["sudo", "sh", "-c", inner])
     tunneld_proc = proc
     return proc
 
