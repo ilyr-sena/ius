@@ -359,11 +359,12 @@ WDA_BUNDLE_ID = os.environ.get(
 )
 WDA_LOCK = threading.Lock()
 WDA_STATE = {"session": None}
+WDA_HTTP = requests.Session()   # keep-alive: no TCP handshake per keystroke
 
 
 def _wda_alive():
     try:
-        r = requests.get(f"{WDA_BASE}/status", timeout=2)
+        r = WDA_HTTP.get(f"{WDA_BASE}/status", timeout=2)
         return r.status_code < 500
     except Exception:
         return False
@@ -395,14 +396,14 @@ def _wda_session_id():
     with WDA_LOCK:
         if WDA_STATE["session"]:
             return WDA_STATE["session"]
-        r = requests.post(f"{WDA_BASE}/session",
+        r = WDA_HTTP.post(f"{WDA_BASE}/session",
                           json={"capabilities": {}}, timeout=8)
         r.raise_for_status()
         sid = r.json()["value"]["sessionId"]
         # Don't let WDA wait for app-idle on every request — animations can
         # stall each keystroke by seconds.
         try:
-            requests.post(
+            WDA_HTTP.post(
                 f"{WDA_BASE}/session/{sid}/appium/settings",
                 json={"settings": {"waitForIdleTimeout": 0}}, timeout=8)
         except Exception as e:
@@ -414,22 +415,6 @@ def _wda_session_id():
 
 def _wda_presskey(name):
     _wda_post_inner("/wda/presskey", {"key": name})
-
-
-def _wda_delete_backward():
-    """Real text deletion: target the active element and send the WebDriver
-    BACK_SPACE code, which WDA translates into a keyboard delete. The
-    hardware-event `presskey delete` does nothing for on-screen keyboards."""
-    sid = _wda_session_id()
-    r = requests.get(f"{WDA_BASE}/session/{sid}/wda/activeElementInfo",
-                     timeout=8)
-    r.raise_for_status()
-    el = r.json().get("value") or {}
-    eid = el.get("ELEMENT") or el.get("wdaElement")
-    if not eid:
-        raise RuntimeError(f"no active element (got keys {list(el)})")
-    _wda_post_inner(f"/element/{eid}/value",
-                    {"value": ["\uE003"], "text": "\uE003"})
 
 
 def _wda_post(path, payload):
@@ -444,14 +429,14 @@ def _wda_post(path, payload):
 
 def _wda_post_inner(path, payload):
     sid = _wda_session_id()
-    r = requests.post(f"{WDA_BASE}/session/{sid}{path}",
+    r = WDA_HTTP.post(f"{WDA_BASE}/session/{sid}{path}",
                       json=payload, timeout=8)
     if r.status_code >= 400:
         # stale/expired session — recreate once and retry
         with WDA_LOCK:
             WDA_STATE["session"] = None
         sid = _wda_session_id()
-        r = requests.post(f"{WDA_BASE}/session/{sid}{path}",
+        r = WDA_HTTP.post(f"{WDA_BASE}/session/{sid}{path}",
                           json=payload, timeout=8)
     r.raise_for_status()
     return r
@@ -469,22 +454,58 @@ def wda_dispatch(action, job):
     elif action == "key":
         key = str(job.get("key") or "")
         if key == "Backspace":
-            try:
-                _wda_delete_backward()
-            except Exception as e:
-                print(f"[!] element delete failed ({e}) - trying presskey")
-                for name in ("backspace", "delete"):
-                    try:
-                        _wda_presskey(name)
-                        break
-                    except Exception:
-                        continue
+            # WDA natively treats ASCII \b as backward-delete on /wda/keys -
+            # same fast path as typing text, works with on-screen keyboards.
+            _wda_post("/wda/keys", {"value": ["\b"]})
             print("[ius] wda key: backspace")
         elif key == "Enter":
-            _wda_presskey("return")
+            try:
+                _wda_post("/wda/keys", {"value": ["\n"]})
+            except Exception:
+                _wda_presskey("return")
             print("[ius] wda key: return")
         else:
             print(f"[!] unsupported wda key '{key}'")
+
+
+# ---- WDA writer: serializes calls, merges bursts -----------------------------
+
+WDA_QUEUE = asyncio.Queue()
+
+
+async def _exec_wda(action, job):
+    try:
+        await asyncio.get_running_loop().run_in_executor(
+            None, wda_dispatch, action, job
+        )
+    except Exception as e:
+        print(f"[!] wda {action} failed: {e}")
+
+
+async def wda_writer():
+    """Single consumer for WDA jobs. Slow typing executes per keystroke with
+    no added delay; when chars arrive faster than WDA answers, everything
+    queued at that moment merges into ONE type call (order preserved)."""
+    while True:
+        job = await WDA_QUEUE.get()
+        if job.get("action") != "type":
+            await _exec_wda(str(job.get("action")), job)
+            continue
+        texts = [str(job.get("text") or "")]
+        while True:
+            try:
+                nxt = WDA_QUEUE.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            if nxt.get("action") == "type":
+                texts.append(str(nxt.get("text") or ""))
+                continue
+            if any(texts):
+                await _exec_wda("type", {"text": "".join(texts)})
+                texts = []
+            await _exec_wda(str(nxt.get("action")), nxt)
+        if any(texts):
+            await _exec_wda("type", {"text": "".join(texts)})
 
 
 # ---- HTTP server with WS upgrade --------------------------------------------
@@ -794,13 +815,7 @@ async def consume_and_stream(queue, hid):
             elif kind == "action":
                 await perform_action(str(job.get("name") or ""))
             elif kind == "wda":
-                action = str(job.get("action") or "")
-                try:
-                    await asyncio.get_running_loop().run_in_executor(
-                        None, wda_dispatch, action, job
-                    )
-                except Exception as e:
-                    print(f"[!] wda {action} failed: {e}")
+                WDA_QUEUE.put_nowait(job)   # gestures never wait on typing
 
     task = asyncio.create_task(consumer())
     try:
@@ -906,6 +921,7 @@ async def amain():
     RS["loop"] = asyncio.get_running_loop()
     RS["queue"] = asyncio.Queue()
     asyncio.create_task(gesture_worker(RS["queue"]))
+    asyncio.create_task(wda_writer())
 
     async def warm_apps():
         await asyncio.sleep(1.5)
