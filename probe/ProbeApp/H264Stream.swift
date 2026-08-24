@@ -388,68 +388,82 @@ video{max-width:100%;max-height:86vh;background:#000;border-radius:6px}
 <div id="s">connecting...</div>
 <script>
 const v = document.getElementById('v'), st = document.getElementById('s');
-const ws = new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.host+'/stream.ws');
+let ws = null, msb = null, sb = null, queue = [], codec = '';
+
+function setStatus(t){ st.textContent = t; }
+
+function openMSE(){
+  if (msb) return;
+  setStatus('opening MSE (' + codec + ')');
+  msb = new MediaSource();
+  msb.addEventListener('sourceopen', onSourceOpen);
+  v.src = URL.createObjectURL(msb);
+}
+
+function onSourceOpen(){
+  setStatus('MSE open');
+  sb = msb.addSourceBuffer('video/mp4; codecs="' + codec + '"');
+  sb.mode = 'segments';
+  sb.addEventListener('updateend', () => { pump(); trim(); live(); });
+  sb.addEventListener('error', () => {
+    setStatus('decoder error - reloading');
+    setTimeout(() => location.reload(), 900);
+  });
+  pump();
+}
+
+function pump(){
+  if (!sb || sb.updating) return;
+  const c = queue.shift();
+  if (c === undefined) return;
+  try { sb.appendBuffer(c); }
+  catch(e) { }
+}
+
+function trim(){
+  try {
+    if (sb && sb.buffered.length && sb.buffered.start(0) < sb.buffered.end(sb.buffered.length-1) - 30)
+      sb.remove(0, sb.buffered.end(sb.buffered.length-1) - 15);
+  } catch(e){}
+}
+
+function live(){
+  try {
+    if (sb && sb.buffered.length) {
+      const end = sb.buffered.end(sb.buffered.length-1);
+      if (v.currentTime < end - 2.5) v.currentTime = Math.max(0, end - 0.35);
+      setStatus('live (buffer ' + Math.max(0, end - v.currentTime).toFixed(2) + 's)');
+    }
+  } catch(e){}
+}
+
+ws = new WebSocket((location.protocol === 'https:' ? 'wss' : 'ws') + '://' + location.host + '/stream.ws');
 ws.binaryType = 'arraybuffer';
-let msb = null, sb = null, queue = [];
-function pump(){ if(!sb || sb.updating || !queue.length) return;
-  const chunk = queue.shift();
-  try { sb.appendBuffer(chunk); } catch(e) { console.warn(e); } }
-ws.onopen = () => { st.textContent = 'ws open - waiting for keyframe'; };
-ws.onerror = (ev) => { st.textContent = 'ws error'; console.log(ev); };
+
+ws.onopen = () => setStatus('ws open - waiting for keyframe');
+ws.onerror = () => setStatus('ws error');
 ws.onclose = () => {
-  st.textContent = 'disconnected - retrying';
+  setStatus('disconnected - retrying');
   setTimeout(() => location.reload(), 1200);
 };
-let gotCodec = false, bytesIn = 0;
+
 ws.onmessage = (e) => {
   if (typeof e.data === 'string') {
     const j = JSON.parse(e.data);
-    if (!j.codec) { console.log('ignoring', j); return; }
-    gotCodec = true;
-    st.textContent = 'codec ' + j.codec + ' - opening MSE';
-    msb = new MediaSource();
-    v.src = URL.createObjectURL(msb);
-    msb.addEventListener('sourceopen', () => {
-      sb = msb.addSourceBuffer('video/mp4; codecs="' + j.codec + '"');
-      sb.mode = 'segments';
-      sb.addEventListener('error', () => {
-        st.textContent = 'decoder error - reloading';
-        setTimeout(() => location.reload(), 900);
-      });
-      sb.addEventListener('updateend', () => {
-        pump(); trim();
-        if (sb.buffered.length) {
-          const end = sb.buffered.end(sb.buffered.length-1);
-          if (v.currentTime < end - 2.5) v.currentTime = Math.max(0, end - 0.35);
-          st.textContent = 'live (buffer '+(end - v.currentTime).toFixed(2)+'s)';
-        }
-      });
-      queue.forEach(c => { try { sb.appendBuffer(c); } catch(e){} });
-      queue = []; pump();
-    });
+    if (!j.codec) return;
+    codec = j.codec;
+    openMSE();
   } else {
-    bytesIn += e.data.byteLength;
-    if (!gotCodec) { st.textContent = 'frames before codec?!'; }
-    else if (!msb) { st.textContent = 'waiting sourceopen'; }
-    if (!sb || sb.updating || queue.length) {
-      if (queue.length < 240) { queue.push(e.data); st.textContent = 'queue=' + queue.length; }
-    } else {
-      try { sb.appendBuffer(new Uint8Array(e.data)); }
-      catch(err) { st.textContent = 'append err: ' + err; console.warn(err); }
-    }
+    if (queue.length > 240) queue.splice(0, 120);
+    queue.push(new Uint8Array(e.data));
+    if (!opened_flag()) setStatus('queued ' + queue.length);
+    pump();
   }
 };
-ws.onclose = () => {
-  st.textContent = 'disconnected - retrying';
-  setTimeout(() => location.reload(), 1200);
-};
-setInterval(() => {
-  try {
-    if (!sb || !sb.buffered.length) return;
-    const end = sb.buffered.end(sb.buffered.length-1);
-    if (sb.buffered.start(0) < end - 30) sb.remove(0, end - 15);
-  } catch(e) {}
-}, 1000);
-</script></body></html>
+
+function opened_flag(){ return msb !== null; }
+
+setInterval(() => { pump(); trim(); live(); }, 500);
+</script>
 """
 }
