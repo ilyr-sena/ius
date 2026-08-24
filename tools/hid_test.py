@@ -280,25 +280,29 @@ async def gesture_worker(queue):
 
 
 async def consume_and_stream(queue, hid):
+    import random
     import time as _t
 
-    state = {"down": False, "x": 0, "y": 0}
+    send_lock = asyncio.Lock()          # serialize ALL touchscreen writes
+    state = {"down": False, "x": norm(0.5), "y": norm(0.5)}
     sent_count = 0
-    down_at = None
+
+    async def send_contact(x, y):
+        async with send_lock:
+            await hid.send_touchscreen(TOUCHSCREEN_STATE_CONTACT, x, y)
+
+    async def send_release(x, y):
+        async with send_lock:
+            await hid.send_touchscreen(TOUCHSCREEN_STATE_RELEASE, x, y)
 
     async def consumer():
-        nonlocal down_at
         while True:
             job = await queue.get()
             kind = job.get("kind")
-            t = _t.monotonic()
-            print(f"[q] {kind} job @ {t:.3f}")
             if kind == "down":
                 state["x"] = norm(job["fx"])
                 state["y"] = norm(job["fy"])
                 state["down"] = True
-                down_at = t
-                print(f"[q] -> CONTACT stream begin ({state['x']},{state['y']})")
             elif kind == "move":
                 state["x"] = norm(job["fx"])
                 state["y"] = norm(job["fy"])
@@ -306,30 +310,50 @@ async def consume_and_stream(queue, hid):
                 state["down"] = False
                 state["x"] = norm(job["fx"])
                 state["y"] = norm(job["fy"])
-                await hid.send_touchscreen(TOUCHSCREEN_STATE_RELEASE,
-                                           state["x"], state["y"])
-                n = _t.monotonic()
-                print(f"[q] RELEASE sent @ {n:.3f} "
-                      f"(held {n-down_at if down_at else 0:.3f}s)")
+                # let any in-flight streamer report finish first
+                await asyncio.sleep(1.5 / STREAM_HZ)
+
+                import time as _t
+                now = _t.monotonic()
+                freeze = now - job.get("last_move_t", now)
+
+                if freeze < 0.15:
+                    # genuine flick released mid-motion: natural momentum
+                    await send_release(state["x"], state["y"])
+                    print("[ius] finger up - momentum!")
+                    continue
+
+                # frozen lift: phantom fling incoming -> lift, then
+                # momentum-cancel tap at the same spot
+                print("[ius] frozen lift - momentum-cancel tap")
+                await send_release(state["x"], state["y"])
+                await asyncio.sleep(0.09)
+                await send_contact(state["x"], state["y"])
+                await asyncio.sleep(0.09)
+                await send_release(state["x"], state["y"])
+                await asyncio.sleep(0.04)
+                await send_release(state["x"], state["y"])   # safety
+                print("[ius] stopped in place")
 
     task = asyncio.create_task(consumer())
     try:
         period = 1.0 / STREAM_HZ
-        sent_count = 0
+        jitter_tick = 0
         while True:
             await asyncio.sleep(period)
             if state["down"]:
-                # UNCONDITIONAL 60Hz streaming: gaps make iOS extrapolate
-                # stale velocity into a phantom fling on lift. A real
-                # digitizer reports continuously, stillness included.
-                await hid.send_touchscreen(TOUCHSCREEN_STATE_CONTACT,
-                                           state["x"], state["y"])
+                jx = max(0, min(65535,
+                        state["x"] + random.randint(-2, 2)))
+                jy = max(0, min(65535,
+                        state["y"] + random.randint(-2, 2)))
+                await send_contact(jx, jy)
                 sent_count += 1
-                if sent_count % 60 == 1:
-                    print(f"[s] contact #{sent_count} @ {_t.monotonic():.3f}")
+                jitter_tick += 1
+                if jitter_tick % 120 == 1:
+                    print(f"[s] streaming, contacts sent: {sent_count}")
     finally:
         task.cancel()
-        print(f"[s] streamer stopped, total contacts sent: {sent_count}")
+        print("[s] streamer stopped")
 
 
 def norm(v):
