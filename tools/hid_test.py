@@ -14,6 +14,8 @@ import socket
 import threading
 import urllib.parse
 
+import requests
+
 from pymobiledevice3.remote.core_device.app_service import AppServiceService
 from pymobiledevice3.remote.core_device.hid_service import (
     HID_BUTTON_STATE_DOWN,
@@ -332,6 +334,60 @@ def run_on_loop(coro, timeout=90):
     return asyncio.run_coroutine_threadsafe(coro, RS["loop"]).result(timeout)
 
 
+# ---- WDA text input (localhost:8100 via stream_run.py --wda) -----------------
+
+WDA_BASE = "http://127.0.0.1:8100"
+WDA_LOCK = threading.Lock()
+WDA_STATE = {"session": None}
+
+
+def _wda_session_id():
+    with WDA_LOCK:
+        if WDA_STATE["session"]:
+            return WDA_STATE["session"]
+        r = requests.post(f"{WDA_BASE}/session",
+                          json={"capabilities": {}}, timeout=8)
+        r.raise_for_status()
+        sid = r.json()["value"]["sessionId"]
+        WDA_STATE["session"] = sid
+        print(f"[+] wda session {sid}")
+        return sid
+
+
+def _wda_post(path, payload):
+    sid = _wda_session_id()
+    r = requests.post(f"{WDA_BASE}/session/{sid}{path}",
+                      json=payload, timeout=8)
+    if r.status_code >= 400:
+        # stale/expired session — recreate once and retry
+        with WDA_LOCK:
+            WDA_STATE["session"] = None
+        sid = _wda_session_id()
+        r = requests.post(f"{WDA_BASE}/session/{sid}{path}",
+                          json=payload, timeout=8)
+    r.raise_for_status()
+    return r
+
+
+def wda_dispatch(action, job):
+    """Runs in an executor thread — never block the asyncio loop."""
+    if action == "type":
+        text = str(job.get("text") or "")
+        if not text:
+            return
+        # types into the currently-focused element on the device
+        _wda_post("/wda/keys", {"value": [text]})
+        print(f"[ius] wda type: {text!r}")
+    elif action == "key":
+        key = str(job.get("key") or "")
+        name = {"Enter": "return", "Backspace": "delete"}.get(key)
+        if name is None:
+            print(f"[!] unsupported wda key '{key}'")
+            return
+        _wda_post("/wda/presskey", {"key": name})
+        print(f"[ius] wda key: {name}")
+
+
 # ---- HTTP server with WS upgrade --------------------------------------------
 
 RS = {"loop": None, "queue": None}
@@ -638,6 +694,14 @@ async def consume_and_stream(queue, hid):
                 print("[ius] finger up")
             elif kind == "action":
                 await perform_action(str(job.get("name") or ""))
+            elif kind == "wda":
+                action = str(job.get("action") or "")
+                try:
+                    await asyncio.get_running_loop().run_in_executor(
+                        None, wda_dispatch, action, job
+                    )
+                except Exception as e:
+                    print(f"[!] wda {action} failed: {e}")
 
     task = asyncio.create_task(consumer())
     try:
