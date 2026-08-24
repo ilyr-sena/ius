@@ -40,6 +40,7 @@ from pymobiledevice3.remote.core_device.hid_service import (
     HID_BUTTON_STATE_UP,
     IndigoHIDService,
     KEY_BACKSPACE,
+    KEYBOARD_SURFACE_DEFAULT_SERVICE_ID,
     KEY_ENTER,
     KEY_LEFT_SHIFT,
     TOUCHSCREEN_STATE_CONTACT,
@@ -227,6 +228,8 @@ def read_ws_frames(sock, ws, on_message):
 # ---- installed apps / icons over tunneld ------------------------------------
 
 async def _rsd_for_device():
+    if RSD_CACHE["rsd"] is not None:
+        return RSD_CACHE["rsd"]
     rsds = await get_tunneld_devices(("127.0.0.1", 49151))
     rsd = next((r for r in rsds if r.udid == UDID), None)
     if rsd is None:
@@ -587,7 +590,9 @@ async def wda_writer():
 # ---- HTTP server with WS upgrade --------------------------------------------
 
 RS = {"loop": None, "queue": None}
+RSD_CACHE = {"rsd": None}
 ACTION_CTX = {
+    "kb_attempt": 0,
     "indigo": None,
     "hid": None,
     "kbd_id": None,
@@ -821,9 +826,14 @@ async def gesture_worker(queue):
                         print("[+] GESTURES LIVE")
                         if ACTION_CTX["want_kb"]:
                             try:
-                                ACTION_CTX["kbd_id"] = await hid.create_keyboard_service()
+                                ACTION_CTX["kb_attempt"] += 1
+                                req = KEYBOARD_SURFACE_DEFAULT_SERVICE_ID + (
+                                    ACTION_CTX["kb_attempt"] % 8
+                                )
+                                got = await hid.create_keyboard_service(service_id=req)
+                                ACTION_CTX["kbd_id"] = got
                                 ACTION_CTX["hid"] = hid
-                                print(f"[+] virtual keyboard mounted ({ACTION_CTX['kbd_id']:#x})")
+                                print(f"[+] virtual keyboard mounted (req {req:#x}, got {got:#x})")
                             except Exception as e:
                                 print(f"[!] keyboard surface unavailable ({e}) - typing falls back to WDA")
                         else:
@@ -834,8 +844,14 @@ async def gesture_worker(queue):
                     ACTION_CTX["hid"] = None
                     ACTION_CTX["kbd_id"] = None
         except Exception as e:
-            print(f"[!] dropped ({e}) - retrying in 3s")
-            await asyncio.sleep(3)
+            RSD_CACHE["rsd"] = None
+            msg = str(e)
+            if msg == "recycle requested":
+                print("[*] HID session recycled")
+                await asyncio.sleep(0.25)
+            else:
+                print(f"[!] dropped ({msg}) - retrying in 3s")
+                await asyncio.sleep(3)
 
 
 async def consume_and_stream(queue, hid):
