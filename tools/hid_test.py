@@ -223,24 +223,48 @@ async def _fetch_apps_async():
             include_default_apps=True,
         )
     out, seen = [], set()
+    n_user = 0
     for a in raw:
         bid = a.get("bundleIdentifier") or a.get("CFBundleIdentifier")
         if not bid or bid in seen:
             continue
+        # Downloaded-app detection that doesn't depend on `applicationType`
+        # (its value/key varies across iOS/DDI versions): user apps install
+        # under /var/containers/Bundle/Application/<UUID>/ and are removable;
+        # stock apps live in the OS cryptex under /Applications/.
+        bpath = str(a.get("applicationBundlePath") or a.get("path") or "")
+        plow = bpath.lower()
         kind = str(a.get("applicationType") or "").lower()
-        if kind != "user" and bid not in STOCK_BUNDLES:
+        is_user = (
+            kind == "user"
+            or bool(a.get("isRemovable") or a.get("removable"))
+            or ("/containers/bundle/application/" in plow
+                and ".staged" not in plow)
+        )
+        if not is_user and bid not in STOCK_BUNDLES:
             continue
         name = str(a.get("displayName") or a.get("name") or "").strip()
         if not name:
             continue
         # executable name from the bundle path: ".../Foo.app/Foo" -> "Foo"
-        bpath = str(a.get("applicationBundlePath") or a.get("path") or "")
         exe = bpath.split(".app/")[-1].strip("/") if ".app/" in bpath else ""
         out.append({"bundleId": bid, "name": name, "exe": exe,
-                    "user": kind == "user"})
+                    "user": is_user})
         seen.add(bid)
+        if is_user:
+            n_user += 1
     out.sort(key=lambda e: (0 if e.pop("user") else 1, e["name"].lower()))
-    print(f"[+] app list: {len(out)} apps")
+    print(f"[+] app list: {len(out)} apps "
+          f"({n_user} downloaded, {len(out) - n_user} stock)")
+    if n_user == 0 and raw:
+        sample = next((a for a in raw
+                       if "containers/bundle/application/" in
+                       str(a.get("applicationBundlePath", "")).lower()),
+                      raw[0])
+        print(f"[!] no downloaded apps detected - sample entry keys: "
+              f"{sorted(sample.keys())}")
+        print(f"[!] sample values: "
+              f"{ {k: sample[k] for k in list(sample)[:8]} }")
     return out
 
 
