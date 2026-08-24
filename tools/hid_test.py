@@ -66,15 +66,26 @@ function dot(fx,fy,rel){
   d.style.left=(fx*100)+'%'; d.style.top=(fy*100)+'%';
   pad.appendChild(d); setTimeout(()=>d.remove(),1200);
 }
+const pending=[];
+let wsReady=false;
+
 async function send(o){
-  try{ ws.send(JSON.stringify(o)); }catch(e){ log('[send failed] '+e); }
+  const msg=JSON.stringify(o);
+  if(wsReady){ try{ ws.send(msg); }catch(e){ log('[send failed] '+e); } }
+  else if(pending.length<240) pending.push(msg);
+}
+function flushPending(){
+  while(pending.length){
+    const m=pending.shift();
+    try{ ws.send(m); }catch(e){ log('[send failed] '+e); }
+  }
 }
 
 const ws=new WebSocket('ws://'+location.host+'/ws');
 ws.binaryType='arraybuffer';
-ws.onopen=()=>setStatus('ws open');
-ws.onclose=()=>{ setStatus('disconnected - reloading'); setTimeout(()=>location.reload(),1200); };
-ws.onerror=()=>setStatus('ws error');
+ws.onopen=()=>{ wsReady=true; setStatus('ws open'); flushPending(); };
+ws.onclose=()=>{ wsReady=false; setStatus('disconnected - reloading'); setTimeout(()=>location.reload(),1200); };
+ws.onerror=()=>{ wsReady=false; setStatus('ws error'); };
 
 function track(fx,fy){
   const nx=Math.round(fx*65535), ny=Math.round(fy*65535);
