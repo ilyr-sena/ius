@@ -224,7 +224,8 @@ async def amain():
     import http.server
     srv = http.server.ThreadingHTTPServer(("127.0.0.1", 9001), CmdHandler)
     print("[*] test pad: http://127.0.0.1:9001/")
-    srv.serve_forever()
+    # serve in a thread: blocking the loop here would starve the worker
+    await asyncio.get_running_loop().run_in_executor(None, srv.serve_forever)
 
 
 if __name__ == "__main__":
