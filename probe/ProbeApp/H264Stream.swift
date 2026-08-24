@@ -405,14 +405,6 @@ final class H264Stream {
 }
 
 extension H264Stream {
-    fileprivate func handleEncodedWithSync(sampleBuffer: CMSampleBuffer) {}
-}
-
-extension H264Stream {
-    fileprivate func handleEncodedWithSync(sampleBuffer: CMSampleBuffer) {}
-}
-
-extension H264Stream {
     static let playerHTML = """
 <!doctype html>
 <html><head><meta charset="utf-8"><title>IUS live - H.264</title>
