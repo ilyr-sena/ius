@@ -354,8 +354,41 @@ def run_on_loop(coro, timeout=90):
 # ---- WDA text input (localhost:8100 via stream_run.py --wda) -----------------
 
 WDA_BASE = "http://127.0.0.1:8100"
+WDA_BUNDLE_ID = os.environ.get(
+    "IUS_WDA_BUNDLE", "com.facebook.WebDriverAgentRunner.xctrunner.SRTHYBYH35"
+)
 WDA_LOCK = threading.Lock()
 WDA_STATE = {"session": None}
+
+
+def _wda_alive():
+    try:
+        r = requests.get(f"{WDA_BASE}/status", timeout=2)
+        return r.status_code < 500
+    except Exception:
+        return False
+
+
+def _wda_launch_and_wait(timeout_s=25):
+    """Launch the WDA runner app and wait for its HTTP server."""
+    import time
+
+    async def _launch():
+        rsd = await _rsd_for_device()
+        async with AppServiceService(rsd) as svc:
+            await svc.launch_application(WDA_BUNDLE_ID)
+
+    print(f"[+] launching WDA runner {WDA_BUNDLE_ID} ...")
+    fut = asyncio.run_coroutine_threadsafe(_launch(), RS["loop"])
+    fut.result(timeout=30)
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        if _wda_alive():
+            print("[+] WDA server up")
+            return True
+        time.sleep(0.7)
+    print("[!] WDA server never came up - is the runner AltStore-signed?")
+    return False
 
 
 def _wda_session_id():
@@ -372,6 +405,16 @@ def _wda_session_id():
 
 
 def _wda_post(path, payload):
+    try:
+        return _wda_post_inner(path, payload)
+    except requests.exceptions.ConnectionError:
+        # server dead -> start the runner app, then retry once
+        if not _wda_launch_and_wait():
+            raise
+        return _wda_post_inner(path, payload)
+
+
+def _wda_post_inner(path, payload):
     sid = _wda_session_id()
     r = requests.post(f"{WDA_BASE}/session/{sid}{path}",
                       json=payload, timeout=8)
