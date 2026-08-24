@@ -45,6 +45,21 @@ PAGE = """<!doctype html>
 <div id="pad"></div>
 <div id="readout">fx=- fy=- | nx=- ny=-</div>
 <div id="log"></div>
+<div style="margin-top:8px">
+ <button class="swp" data-dir="left">&#8592; left</button>
+ <button class="swp" data-dir="right">right &#8594;</button>
+ <button class="swp" data-dir="up">&#8593; up</button>
+ <button class="swp" data-dir="down">&#8595; down</button>
+</div>
+<script>
+document.querySelectorAll('.swp').forEach(b => b.addEventListener('click', () => {
+  const dir = b.dataset.dir, c = 0.5, off = 0.25;
+  const m = {left:[c+off,c,c-off,c], right:[c-off,c,c+off,c],
+             up:[c,c+off,c,c-off], down:[c,c-off,c,c+off]}[dir];
+  send({kind:'swipe', x1:m[0], y1:m[1], x2:m[2], y2:m[3], steps:24, durMs:350});
+  log('=> paced ' + dir + ' swipe');
+}));
+</script>
 <script>
 const pad=document.getElementById('pad'),ro=document.getElementById('readout'),
       lg=document.getElementById('log');
@@ -86,7 +101,7 @@ window.addEventListener('mousemove',e=>{
   if(!dragging)return;
   dot(fx,fy,false);
   const now=performance.now();
-  if(Math.hypot(fx-sx,fy-sy)*65535>300 && now-lastSent>35){
+  if(Math.hypot(fx-sx,fy-sy)*65535>150 && now-lastSent>16){
     lastSent=now; send({kind:'move',fx,fy});
   }
 });
