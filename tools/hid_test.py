@@ -322,9 +322,12 @@ async def consume_and_stream(queue, hid):
                 # same point - the tap cancels the momentum -> stops in place
                 print("[ius] frozen lift - momentum-cancel tap")
                 await hid.send_touchscreen(TOUCHSCREEN_STATE_RELEASE, x, y)
-                await asyncio.sleep(0.04)
+                await asyncio.sleep(0.09)          # let the lift register fully
                 await hid.send_touchscreen(TOUCHSCREEN_STATE_CONTACT, x, y)
-                await asyncio.sleep(0.06)
+                await asyncio.sleep(0.09)          # distinct touch duration
+                await hid.send_touchscreen(TOUCHSCREEN_STATE_RELEASE, x, y)
+                await asyncio.sleep(0.04)
+                # safety: re-assert release in case a report dropped
                 await hid.send_touchscreen(TOUCHSCREEN_STATE_RELEASE, x, y)
                 print("[ius] stopped in place")
 
