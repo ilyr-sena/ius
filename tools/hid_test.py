@@ -283,9 +283,15 @@ async def consume_and_stream(queue, hid):
     import random
     import time as _t
 
-    send_lock = asyncio.Lock()          # serialize ALL touchscreen writes
+    send_lock = asyncio.Lock()
     state = {"down": False, "x": norm(0.5), "y": norm(0.5)}
-    sent_count = 0
+    lnx = None
+    lny = None
+    snx = 0.0
+    sny = 0.0
+    last_move_wall = 0.0
+    settling = False
+    settled_done = False
 
     async def send_contact(x, y):
         async with send_lock:
@@ -296,6 +302,7 @@ async def consume_and_stream(queue, hid):
             await hid.send_touchscreen(TOUCHSCREEN_STATE_RELEASE, x, y)
 
     async def consumer():
+        nonlocal lnx, lny, snx, sny, last_move_wall, settling, settled_done
         while True:
             job = await queue.get()
             kind = job.get("kind")
@@ -303,54 +310,66 @@ async def consume_and_stream(queue, hid):
                 state["x"] = norm(job["fx"])
                 state["y"] = norm(job["fy"])
                 state["down"] = True
+                lnx = lny = None
+                snx = sny = 0.0
+                settling = False
+                settled_done = False
+                last_move_wall = _t.monotonic()
             elif kind == "move":
                 state["x"] = norm(job["fx"])
                 state["y"] = norm(job["fy"])
+                nx = norm(job["fx"]); ny = norm(job["fy"])
+                if lnx is not None:
+                    ddx, ddy = nx - lnx, ny - lny
+                    if abs(ddx) + abs(ddy) > 25:
+                        snx, sny = ddx, ddy
+                lnx, lny = nx, ny
+                settling = False
+                last_move_wall = _t.monotonic()
             elif kind == "release":
                 state["down"] = False
                 state["x"] = norm(job["fx"])
                 state["y"] = norm(job["fy"])
-                # let any in-flight streamer report finish first
-                await asyncio.sleep(1.5 / STREAM_HZ)
-
-                import time as _t
-                now = _t.monotonic()
-                freeze = now - job.get("last_move_t", now)
-
-                if freeze < 0.15:
-                    # genuine flick released mid-motion: natural momentum
-                    await send_release(state["x"], state["y"])
-                    print("[ius] finger up - momentum!")
-                    continue
-
-                # frozen lift: phantom fling incoming -> lift, then
-                # momentum-cancel tap at the same spot
-                print("[ius] frozen lift - momentum-cancel tap")
                 await send_release(state["x"], state["y"])
-                await asyncio.sleep(0.09)
-                await send_contact(state["x"], state["y"])
-                await asyncio.sleep(0.09)
-                await send_release(state["x"], state["y"])
-                await asyncio.sleep(0.04)
-                await send_release(state["x"], state["y"])   # safety
-                print("[ius] stopped in place")
+                print("[ius] finger up")
 
     task = asyncio.create_task(consumer())
     try:
         period = 1.0 / STREAM_HZ
-        jitter_tick = 0
         while True:
             await asyncio.sleep(period)
-            if state["down"]:
-                jx = max(0, min(65535,
-                        state["x"] + random.randint(-2, 2)))
-                jy = max(0, min(65535,
-                        state["y"] + random.randint(-2, 2)))
+            if not state["down"]:
+                continue
+            now = _t.monotonic()
+            active = (now - last_move_wall) < 0.12
+
+            if active:
+                settling = False
+                jx = max(0, min(65535, state["x"] + random.randint(-2, 2)))
+                jy = max(0, min(65535, state["y"] + random.randint(-2, 2)))
                 await send_contact(jx, jy)
-                sent_count += 1
-                jitter_tick += 1
-                if jitter_tick % 120 == 1:
-                    print(f"[s] streaming, contacts sent: {sent_count}")
+            elif not settled_done and (abs(snx) + abs(sny)) > 60:
+                # cursor froze mid-gesture: ease-out along last direction
+                settling = True
+                print("[ius] cursor froze - easing out...")
+                gx = float(state["x"]); gy = float(state["y"])
+                sxg = snx * 0.30; syg = sny * 0.30
+                for _i in range(14):
+                    await asyncio.sleep(0.016)
+                    gx += sxg; gy += syg
+                    sxg *= 0.70; syg *= 0.70
+                    gx = min(65535, max(0, gx)); gy = min(65535, max(0, gy))
+                    await send_contact(round(gx), round(gy))
+                state["x"] = int(min(65535, max(0, gx)))
+                state["y"] = int(min(65535, max(0, gy)))
+                settled_done = True
+                settling = False
+                print("[ius] eased out - holding still")
+            else:
+                # settled or stationary hold: gentle jitter keeps contact alive
+                jx = max(0, min(65535, state["x"] + random.randint(-1, 1)))
+                jy = max(0, min(65535, state["y"] + random.randint(-1, 1)))
+                await send_contact(jx, jy)
     finally:
         task.cancel()
         print("[s] streamer stopped")
