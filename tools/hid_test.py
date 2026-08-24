@@ -472,7 +472,29 @@ def wda_dispatch(action, job):
             print(f"[!] unsupported wda key '{key}'")
 
 
-# ---- input dispatch: HID keyboard first, WDA fallback ------------------------
+
+# Browser KeyboardEvent.code -> HID usage. Raw scancodes are forwarded and the
+# device decodes them with ITS OWN configured hardware-keyboard layout, so any
+# distribution (QWERTY/AZERTY/ES/dead keys/AltGr) behaves exactly natively.
+_HID_CODE_MAP = {"KeyA": 0x04}
+_HID_CODE_MAP.update(
+    {f"Key{c}": u for u, c in enumerate("BCDEFGHIJKLMNOPQRSTUVWXYZ", start=5)}
+)
+_HID_CODE_MAP.update({f"Digit{i}": 0x1E + n for n, i in enumerate("123456789")})
+_HID_CODE_MAP.update({
+    "Digit0": 0x27, "Enter": 0x28, "Escape": 0x29, "Backspace": 0x2A,
+    "Tab": 0x2B, "Space": 0x2C, "Minus": 0x2D, "Equal": 0x2E,
+    "BracketLeft": 0x2F, "BracketRight": 0x30, "Backslash": 0x31,
+    "IntlBackslash": 0x64, "Semicolon": 0x33, "Quote": 0x34,
+    "Backquote": 0x35, "Comma": 0x36, "Period": 0x37, "Slash": 0x38,
+    "CapsLock": 0x39, "NumpadEnter": 0x58, "NumpadAdd": 0x57,
+    "NumpadSubtract": 0x56, "NumpadDecimal": 0x63,
+})
+_HID_CODE_MAP.update({f"F{n}": 0x3A + n - 1 for n in range(1, 13)})
+_HID_CODE_MAP.update({
+    "ArrowUp": 0x52, "ArrowDown": 0x51, "ArrowLeft": 0x50, "ArrowRight": 0x4F,
+})
+
 
 WDA_QUEUE = asyncio.Queue()
 
@@ -505,6 +527,23 @@ async def _hid_send_char(ch):
 async def _input_dispatch(job):
     """HID path = hardware-speed keystrokes, zero HTTP. Anything the keyboard
     surface can't handle (no session, unicode) falls back to WDA."""
+    if job.get("kind") == "hid":
+        usage = _HID_CODE_MAP.get(str(job.get("code") or ""))
+        if usage is None:
+            print(f"[!] unmapped key code '{job.get('code')}'")
+            return
+        codes = {usage}
+        if job.get("shift"):
+            codes.add(KEY_LEFT_SHIFT)
+        if job.get("ctrl"):
+            codes.add(0xE0)
+        if job.get("alt"):
+            codes.add(0xE2)
+        if await _hid_send_usages(codes):
+            return
+        # keyboard surface unavailable -> best-effort WDA for plain text
+        await _exec_wda("type", {"text": str(job.get("text") or "")})
+        return
     action = str(job.get("action") or "")
     if action == "type":
         ch = str(job.get("text") or "")
