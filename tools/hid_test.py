@@ -45,21 +45,6 @@ PAGE = """<!doctype html>
 <div id="pad"></div>
 <div id="readout">fx=- fy=- | nx=- ny=-</div>
 <div id="log"></div>
-<div style="margin-top:8px">
- <button class="swp" data-dir="left">&#8592; left</button>
- <button class="swp" data-dir="right">right &#8594;</button>
- <button class="swp" data-dir="up">&#8593; up</button>
- <button class="swp" data-dir="down">&#8595; down</button>
-</div>
-<script>
-document.querySelectorAll('.swp').forEach(b => b.addEventListener('click', () => {
-  const dir = b.dataset.dir, c = 0.5, off = 0.25;
-  const m = {left:[c+off,c,c-off,c], right:[c-off,c,c+off,c],
-             up:[c,c+off,c,c-off], down:[c,c-off,c,c+off]}[dir];
-  send({kind:'swipe', x1:m[0], y1:m[1], x2:m[2], y2:m[3], steps:24, durMs:350});
-  log('=> paced ' + dir + ' swipe');
-}));
-</script>
 <script>
 const pad=document.getElementById('pad'),ro=document.getElementById('readout'),
       lg=document.getElementById('log');
@@ -165,34 +150,17 @@ def norm(v):
 async def run_job(hid, indigo, job):
     kind = job.get("kind")
 
-    if kind == "down" or kind == "move":
+    if kind == "down":
         x, y = norm(job["fx"]), norm(job["fy"])
         await hid.send_touchscreen(TOUCHSCREEN_STATE_CONTACT, x, y)
-        await asyncio.sleep(0.008)
 
-    elif kind == "tap":
+    elif kind == "move":
         x, y = norm(job["fx"]), norm(job["fy"])
         await hid.send_touchscreen(TOUCHSCREEN_STATE_CONTACT, x, y)
-        await asyncio.sleep(max(0.02, job.get("holdMs", 60) / 1000))
+
+    elif kind == "release":
+        x, y = norm(job["fx"]), norm(job["fy"])
         await hid.send_touchscreen(TOUCHSCREEN_STATE_RELEASE, x, y)
-
-    elif kind == "swipe":
-        steps = int(job.get("steps", 24))
-        dur = float(job.get("durMs", 350)) / 1000.0
-        x1, y1 = norm(job["x1"]), norm(job["y1"])
-        x2, y2 = norm(job["x2"]), norm(job["y2"])
-        await hid.send_touchscreen(build_touchscreen_report(
-            TOUCHSCREEN_STATE_CONTACT, x1, y1))
-        per = dur / max(steps, 1)
-        for i in range(1, steps + 1):
-            await asyncio.sleep(per)
-            xi = x1 + (x2 - x1) * i / steps
-            yi = y1 + (y2 - y1) * i / steps
-            await hid.send_touchscreen(build_touchscreen_report(
-                TOUCHSCREEN_STATE_CONTACT, round(xi), round(yi)))
-        await hid.send_touchscreen(build_touchscreen_report(
-            TOUCHSCREEN_STATE_RELEASE, x2, y2))
-
 
 async def gesture_worker(queue):
     from pymobiledevice3.tunneld.api import get_tunneld_devices
