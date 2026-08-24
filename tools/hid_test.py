@@ -152,17 +152,14 @@ async def run_job(hid, indigo, job):
 
     if kind == "down" or kind == "move":
         x, y = norm(job["fx"]), norm(job["fy"])
-        await hid.send_touchscreen(build_touchscreen_report(
-            TOUCHSCREEN_STATE_CONTACT, x, y))
+        await hid.send_touchscreen(TOUCHSCREEN_STATE_CONTACT, x, y)
         await asyncio.sleep(0.008)
 
     elif kind == "tap":
         x, y = norm(job["fx"]), norm(job["fy"])
-        await hid.send_touchscreen(build_touchscreen_report(
-            TOUCHSCREEN_STATE_CONTACT, x, y))
+        await hid.send_touchscreen(TOUCHSCREEN_STATE_CONTACT, x, y)
         await asyncio.sleep(max(0.02, job.get("holdMs", 60) / 1000))
-        await hid.send_touchscreen(build_touchscreen_report(
-            TOUCHSCREEN_STATE_RELEASE, x, y))
+        await hid.send_touchscreen(TOUCHSCREEN_STATE_RELEASE, x, y)
 
     elif kind == "swipe":
         steps = int(job.get("steps", 24))
