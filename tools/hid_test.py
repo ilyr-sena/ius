@@ -311,49 +311,53 @@ async def consume_and_stream(queue, hid):
         nonlocal snx, sny, last_move_wall
         nonlocal settling, settled_done, settled_at, contacted
         while True:
-            job = await queue.get()
-            kind = job.get("kind")
-            t = _t.monotonic()
+            try:
+                job = await queue.get()
+                kind = job.get("kind")
+                t = _t.monotonic()
 
-            if kind == "down":
-                kin["lx"], kin["ly"], kin["lt"] = job["fx"], job["fy"], t
-                kin["vx"] = kin["vy"] = 0.0
-                state["down"] = True
-                state["fx"], state["fy"] = job["fx"], job["fy"]
-                contacted = True
-                lnx = lny = None
-                snx = sny = 0.0
-                settling = False
-                settled_done = False
-                settled_at = 0.0
-                last_move_wall = t
-                await send_contact(state["x"], state["y"])
+                if kind == "down":
+                    kin["lx"], kin["ly"], kin["lt"] = job["fx"], job["fy"], t
+                    kin["vx"] = kin["vy"] = 0.0
+                    state["down"] = True
+                    state["fx"], state["fy"] = job["fx"], job["fy"]
+                    contacted = True
+                    snx = sny = 0.0
+                    settling = False
+                    settled_done = False
+                    settled_at = 0.0
+                    last_move_wall = t
+                    await send_contact(state["x"], state["y"])
 
-            elif kind == "move":
-                dt = t - kin["lt"] if kin["lt"] else 0.016
-                if dt <= 0: dt = 0.001
-                nvx = (job["fx"] - kin["lx"]) / dt
-                nvy = (job["fy"] - kin["ly"]) / dt
-                kin["vx"] = 0.65 * kin["vx"] + 0.35 * nvx
-                kin["vy"] = 0.65 * kin["vy"] + 0.35 * nvy
-                kin["lx"], kin["ly"], kin["lt"] = job["fx"], job["fy"], t
-                state["x"] = norm(job["fx"])
-                state["y"] = norm(job["fy"])
-                nx = norm(job["fx"]); ny = norm(job["fy"])
-                if lnx is not None:
-                    ddx, ddy = nx - lnx, ny - lny
-                    if abs(ddx) + abs(ddy) > 25:
-                        snx, sny = ddx, ddy
-                lnx, lny = nx, ny
-                settling = False
-                last_move_wall = t
+                elif kind == "move":
+                    if not state["down"]:
+                        continue          # stray move before touch began
+                    dt = t - kin["lt"] if kin["lt"] else 0.016
+                    if dt <= 0: dt = 0.001
+                    nvx = (job["fx"] - kin["lx"]) / dt
+                    nvy = (job["fy"] - kin["ly"]) / dt
+                    kin["vx"] = 0.65 * kin["vx"] + 0.35 * nvx
+                    kin["vy"] = 0.65 * kin["vy"] + 0.35 * nvy
+                    kin["lx"], kin["ly"], kin["lt"] = job["fx"], job["fy"], t
+                    state["x"] = norm(job["fx"])
+                    state["y"] = norm(job["fy"])
+                    nx = norm(job["fx"]); ny = norm(job["fy"])
+                    if lnx is not None:
+                        ddx, ddy = nx - lnx, ny - lny
+                        if abs(ddx) + abs(ddy) > 25:
+                            snx, sny = ddx, ddy
+                    lnx, lny = nx, ny
+                    settling = False
+                    last_move_wall = t
 
-            elif kind == "release":
-                state["down"] = False                   # stops streamer+easeout
-                x = norm(job["fx"]); y = norm(job["fy"])
-                state["x"], state["y"] = x, y
-                await send_release(x, y)
-                print("[ius] finger up")
+                elif kind == "release":
+                    state["down"] = False
+                    x = norm(job["fx"]); y = norm(job["fy"])
+                    state["x"], state["y"] = x, y
+                    await send_release(x, y)
+            except Exception as e:
+                # never let one bad job kill the consumer task
+                print(f"[!] consumer error: {type(e).__name__}: {e}")
 
     task = asyncio.create_task(consumer())
     try:
