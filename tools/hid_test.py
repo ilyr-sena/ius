@@ -68,6 +68,7 @@ function dot(fx,fy,rel){
   pad.appendChild(d); setTimeout(()=>d.remove(),1200);
 }
 async function send(o){
+  if (ws.readyState !== 1) return;   // not open yet - nothing to deliver
   try{ ws.send(JSON.stringify(o)); }catch(e){ log('[send failed] '+e); }
 }
 
@@ -219,7 +220,8 @@ class CmdHandler(http.server.BaseHTTPRequestHandler):
                     "Upgrade: websocket\r\nConnection: Upgrade\r\n"
                     f"Sec-WebSocket-Accept: {accept}\r\n\r\n")
             self.wfile.write(resp.encode())
-            self.close_connection = True
+            self.wfile.flush()
+            self.close_connection = False   # socket now belongs to the ws layer
             ws = MiniWS(self.connection)
 
             def on_message(op, payload):
@@ -238,7 +240,13 @@ class CmdHandler(http.server.BaseHTTPRequestHandler):
                                       args=(self.connection, ws, on_message),
                                       daemon=True)
             reader.start()
-            return
+
+            # park this handler thread: the socket belongs to the ws layer
+            # now, and the base class must not touch or close it
+            import time as _time
+            while not ws.closed:
+                _time.sleep(0.25)
+            self.close_connection = True
         self.send_error(404)
 
     def log_message(self, *a):
