@@ -48,7 +48,8 @@ PAGE = """<!doctype html>
 <script>
 const pad=document.getElementById('pad'),ro=document.getElementById('readout'),
       lg=document.getElementById('log');
-let ws,dragging=false,sx=0,sy=0,lx=0,ly=0,t0=0;
+let dragging=false,sx=0,sy=0,lx=0,ly=0,t0=0;
+window.onerror=(m)=>{ log('JS ERROR: '+m); };
 
 function frac(ev){
   const r=pad.getBoundingClientRect();
