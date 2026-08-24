@@ -213,8 +213,7 @@ class CmdHandler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
-        if path == "/ws" and "upgrade" in self.headers.get(
-                "Upgrade", "").lower():
+        if path == "/ws" and self.headers.get("Upgrade"):
             key = self.headers.get("Sec-WebSocket-Key", "")
             accept = base64.b64encode(
                 hashlib.sha1((key + WS_GUID).encode()).digest()).decode()
