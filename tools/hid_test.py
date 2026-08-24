@@ -63,14 +63,24 @@ function dot(fx,fy,rel){
   d.style.left=(fx*100)+'%'; d.style.top=(fy*100)+'%';
   pad.appendChild(d); setTimeout(()=>d.remove(),1200);
 }
+const pending=[];
+let wsReady=false;
+
 async function send(o){
-  try{ ws.send(JSON.stringify(o)); }catch(e){ log('[send failed] '+e); }
+  const msg=JSON.stringify(o);
+  if(wsReady){ 
+    try{ ws.send(msg); }catch(e){ log('[send failed] '+e); }
+  } else if(pending.length<240) pending.push(msg);
 }
 
 const ws=new WebSocket('ws://'+location.host+'/ws');
 ws.binaryType='arraybuffer';
-ws.onopen=()=>setStatus('ws open');
-ws.onclose=()=>{ setStatus('disconnected - reloading'); setTimeout(()=>location.reload(),1200); };
+ws.onopen=()=>{ wsReady=true; setStatus('ws open');
+  while(pending.length && ws.readyState===1){
+    try{ ws.send(pending.shift()); }catch(e){}
+  }
+};
+ws.onclose=()=>{ wsReady=false; setStatus('disconnected - reloading'); setTimeout(()=>location.reload(),1200); };
 ws.onerror=()=>setStatus('ws error');
 
 function track(fx,fy){
