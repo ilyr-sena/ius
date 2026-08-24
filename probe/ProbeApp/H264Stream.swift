@@ -397,7 +397,10 @@ function pump(){ if(!sb || sb.updating || !queue.length) return;
   try { sb.appendBuffer(chunk); } catch(e) { console.warn(e); } }
 ws.onopen = () => { st.textContent = 'ws open - waiting for keyframe'; };
 ws.onerror = (ev) => { st.textContent = 'ws error'; console.log(ev); };
-ws.onclose = () => { st.textContent = 'disconnected'; };
+ws.onclose = () => {
+  st.textContent = 'disconnected - retrying';
+  setTimeout(() => location.reload(), 1200);
+};
 let gotCodec = false, bytesIn = 0;
 ws.onmessage = (e) => {
   if (typeof e.data === 'string') {
@@ -409,6 +412,10 @@ ws.onmessage = (e) => {
     msb.addEventListener('sourceopen', () => {
       sb = msb.addSourceBuffer('video/mp4; codecs="' + j.codec + '"');
       sb.mode = 'segments';
+      sb.addEventListener('error', () => {
+        st.textContent = 'decoder error - reloading';
+        setTimeout(() => location.reload(), 900);
+      });
       sb.addEventListener('updateend', () => {
         pump(); trim();
         if (sb.buffered.length) {
@@ -432,7 +439,10 @@ ws.onmessage = (e) => {
     }
   }
 };
-ws.onclose = () => { st.textContent = 'disconnected'; };
+ws.onclose = () => {
+  st.textContent = 'disconnected - retrying';
+  setTimeout(() => location.reload(), 1200);
+};
 setInterval(() => {
   try {
     if (!sb || !sb.buffered.length) return;

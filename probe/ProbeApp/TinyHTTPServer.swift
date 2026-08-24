@@ -110,14 +110,20 @@ private func wsSHA1(_ data: Data) -> Data {
     Data(Insecure.SHA1.hash(data: data))
 }
 
-/// Minimal server-side WebSocket: binary/text sends, close/ping handling.
+/// Minimal server-side WebSocket: per-client outbound queue so one slow or
+/// dead viewer can never stall other viewers or the encoder pipeline.
 final class WebSocketConn {
     let conn: NWConnection
-    private let queue = DispatchQueue(label: "ius.ws")
-    private var buffer = Data()
-    private var closed = false
-    private let sendLock = NSLock()
     let onClose: () -> Void
+
+    private let lock = NSLock()
+    private var outbox: [Data] = []
+    private var outBytes = 0
+    private var flushing = false
+    private var closed = false
+    private var buffer = Data()
+
+    static let maxOutboxBytes = 6 * 1024 * 1024
 
     init(conn: NWConnection, onClose: @escaping () -> Void) {
         self.conn = conn
@@ -125,34 +131,39 @@ final class WebSocketConn {
         recvLoop()
     }
 
-    deinit { /* conn cancelled by close() */ }
+    /// Queue a websocket binary/text frame. Never blocks the caller.
+    func enqueue(opcode: UInt8 = 0x2, payload: Data) {
+        lock.lock()
+        guard !closed else { lock.unlock(); return }
+        var frame = encodeFrame(opcode: opcode, payload: payload)
+        outbox.append(frame)
+        outBytes += frame.count
+        frame = Data()
+        let overflow = outBytes > Self.maxOutboxBytes
+        lock.unlock()
+        if overflow {
+            print("[ius] ws outbox overflow - dropping client")
+            close()
+            return
+        }
+        pump()
+    }
+
+    func sendText(_ t: String) { enqueue(opcode: 0x1, payload: Data(t.utf8)) }
+    func sendBinary(_ d: Data) { enqueue(opcode: 0x2, payload: d) }
 
     func close() {
-        guard !closed else { return }
+        lock.lock()
+        guard !closed else { lock.unlock(); return }
         closed = true
+        outbox = []
+        outBytes = 0
+        lock.unlock()
         conn.cancel()
         onClose()
     }
 
-    private func failClose() {
-        guard !closed else { return }
-        closed = true
-        conn.cancel()
-        onClose()
-    }
-
-    func sendBinary(_ data: Data) {
-        sendFrame(opcode: 0x2, payload: data)
-    }
-
-    func sendText(_ text: String) {
-        sendFrame(opcode: 0x1, payload: Data(text.utf8))
-    }
-
-    private func sendFrame(opcode: UInt8, payload: Data) {
-        sendLock.lock()
-        defer { sendLock.unlock() }
-        guard !closed else { return }
+    private func encodeFrame(opcode: UInt8, payload: Data) -> Data {
         var frame = Data([0x80 | opcode])
         let n = payload.count
         if n < 126 {
@@ -165,41 +176,73 @@ final class WebSocketConn {
             frame.append(contentsOf: withUnsafeBytes(of: UInt64(n).bigEndian) { Data($0) })
         }
         frame.append(payload)
-        conn.send(content: frame, completion: .contentProcessed { [weak self] error in
-            if error != nil { self?.failClose() }
+        return frame
+    }
+
+    private func pump() {
+        lock.lock()
+        if flushing || closed {
+            lock.unlock()
+            return
+        }
+        flushing = true
+        let batch = outbox
+        outbox = []
+        outBytes = 0
+        lock.unlock()
+
+        guard !batch.isEmpty else {
+            lock.lock(); flushing = false; lock.unlock()
+            return
+        }
+        var all = Data()
+        for f in batch { all.append(f) }
+
+        conn.send(content: all, completion: .contentProcessed { [weak self] error in
+            guard let self else { return }
+            self.lock.lock()
+            self.flushing = false
+            let more = !self.outbox.isEmpty && !self.closed
+            self.lock.unlock()
+            if error != nil {
+                self.close()
+                return
+            }
+            if more { self.pump() }
         })
     }
 
     private func recvLoop() {
-        guard !closed else { return }
+        lock.lock()
+        let alive = !closed
+        lock.unlock()
+        guard alive else { return }
         conn.receive(minimumIncompleteLength: 1, maximumLength: 262144) { [weak self] d, _, _, err in
             guard let self else { return }
-            if err != nil { self.failClose(); return }
+            if err != nil { self.close(); return }
             if let d { self.buffer += d }
             self.processFrames()
-            if self.closed { return }
             self.recvLoop()
         }
     }
 
     private func processFrames() {
         while true {
-            guard let (opcode, payload, consumed) = parseFrame() else { break }
-            buffer.removeSubrange(..<consumed)
+            guard let (opcode, payload) = parseFrame() else { break }
             switch opcode {
             case 0x8:                       // close
-                sendFrame(opcode: 0x8, payload: Data())
+                enqueue(opcode: 0x8, payload: Data())
                 close()
                 return
             case 0x9:                       // ping -> pong
-                sendFrame(opcode: 0xA, payload: payload)
-            default:                        // text/binary/continuation from client: ignored
-                break
+                enqueue(opcode: 0xA, payload: payload)
+            default:
+                break                       // client messages ignored
             }
         }
     }
 
-    private func parseFrame() -> (UInt8, Data, Int)? {
+    private func parseFrame() -> (UInt8, Data)? {
         let b = buffer
         guard b.count >= 2 else { return nil }
         let opcode = b[0] & 0x7F
@@ -225,6 +268,6 @@ final class WebSocketConn {
         if masked, !maskKey.isEmpty {
             for i in 0..<payload.count { payload[i] ^= maskKey[i % 4] }
         }
-        return (opcode, payload, off + len)
+        return (opcode, payload)
     }
 }
