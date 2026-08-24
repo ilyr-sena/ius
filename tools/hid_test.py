@@ -212,7 +212,7 @@ async def _rsd_for_device():
 
 
 async def _fetch_apps_async():
-    """Installed, user-visible apps: User apps first (A-Z), then stock/System."""
+    """Downloaded (User) apps + regularly-used stock apps; User apps first."""
     rsd = await _rsd_for_device()
     async with AppServiceService(rsd) as svc:
         raw = await svc.list_apps(
@@ -227,16 +227,71 @@ async def _fetch_apps_async():
         bid = a.get("bundleIdentifier") or a.get("CFBundleIdentifier")
         if not bid or bid in seen:
             continue
-        name = str(a.get("displayName") or a.get("name") or "").strip()
         kind = str(a.get("applicationType") or "").lower()
-        # daemons have no display name; skip anything we can't label
+        if kind != "user" and bid not in STOCK_BUNDLES:
+            continue
+        name = str(a.get("displayName") or a.get("name") or "").strip()
         if not name:
             continue
-        out.append({"bundleId": bid, "name": name, "user": kind == "user"})
+        # executable name from the bundle path: ".../Foo.app/Foo" -> "Foo"
+        bpath = str(a.get("applicationBundlePath") or a.get("path") or "")
+        exe = bpath.split(".app/")[-1].strip("/") if ".app/" in bpath else ""
+        out.append({"bundleId": bid, "name": name, "exe": exe,
+                    "user": kind == "user"})
         seen.add(bid)
     out.sort(key=lambda e: (0 if e.pop("user") else 1, e["name"].lower()))
     print(f"[+] app list: {len(out)} apps")
     return out
+
+
+def _token_name(tok):
+    """Best-effort executable name from a CoreDevice process token."""
+    for k in ("name", "executablePath", "executable"):
+        v = tok.get(k)
+        if isinstance(v, dict):
+            v = next(iter(v.values()), None)
+        if isinstance(v, str) and v.strip():
+            return v.strip().rsplit("/", 1)[-1]
+    return None
+
+
+def _token_pid(tok):
+    p = tok.get("pid")
+    try:
+        return int(p)
+    except (TypeError, ValueError):
+        return None
+
+
+async def _running_apps_async():
+    """[{bundleId, pid}] for app processes currently alive on the device."""
+    with APPS_LOCK:
+        lst = APPS_STATE["list"] or []
+    exe_map = {e["exe"]: e["bundleId"] for e in lst if e.get("exe")}
+    rsd = await _rsd_for_device()
+    async with AppServiceService(rsd) as svc:
+        toks = await svc.list_processes()
+    running = []
+    for tok in toks:
+        nm, pid = _token_name(tok), _token_pid(tok)
+        if not nm or pid is None:
+            continue
+        bid = exe_map.get(nm)
+        if bid:
+            running.append({"bundleId": bid, "pid": pid})
+    return running
+
+
+async def _launch_app_async(bundle_id):
+    rsd = await _rsd_for_device()
+    async with AppServiceService(rsd) as svc:
+        await svc.launch_application(bundle_id)
+
+
+async def _kill_pid_async(pid):
+    rsd = await _rsd_for_device()
+    async with AppServiceService(rsd) as svc:
+        await svc.send_signal_to_process(pid, 9)   # SIGKILL
 
 
 async def _fetch_icon_async(bundle_id):
@@ -261,8 +316,49 @@ ACTION_CTX = {"indigo": None}
 # ---- installed-apps cache (CoreDevice appservice + iconservice) --------------
 ICON_CACHE_DIR = pathlib.Path.home() / ".cache" / "ius" / "icons"
 APPS_LOCK = threading.Lock()
-APPS_STATE = {"list": None}      # [{"bundleId","name"}] once warmed
+APPS_STATE = {"list": None}      # [{"bundleId","name","exe"}] once warmed
 ICON_MEM = {}                    # bundleId -> png bytes
+
+# Regularly-used stock apps worth showing alongside downloaded (User) apps.
+# Wrong/missing IDs simply don't appear - safe to extend freely.
+STOCK_BUNDLES = {
+    "com.apple.Preferences",         # Settings
+    "com.apple.camera",              # Camera
+    "com.apple.AppStore",            # App Store
+    "com.apple.mobilenotes",         # Notes
+    "com.apple.calculator",          # Calculator
+    "com.apple.mobilecal",           # Calendar
+    "com.apple.mobiletimer",         # Clock
+    "com.apple.DocumentsApp",        # Files
+    "com.apple.MobileSMS",           # Messages
+    "com.apple.mail",                # Mail
+    "com.apple.Maps",                # Maps
+    "com.apple.mobilesafari",        # Safari
+    "com.apple.mobileslideshow",     # Photos
+    "com.apple.Music",               # Music
+    "com.apple.weather",             # Weather
+    "com.apple.reminders",           # Reminders
+    "com.apple.Health",              # Health
+    "com.apple.Wallet",              # Wallet
+    "com.apple.facetime",            # FaceTime
+    "com.apple.MobileAddressBook",   # Contacts
+    "com.apple.podcasts",            # Podcasts
+    "com.apple.iBooks",              # Books
+    "com.apple.news",                # News
+    "com.apple.tv",                  # TV
+    "com.apple.Home",                # Home
+    "com.apple.stocks",              # Stocks
+    "com.apple.shortcuts",           # Shortcuts
+    "com.apple.freeform",            # Freeform
+    "com.apple.Journal",             # Journal
+    "com.apple.VoiceMemos",          # Voice Memos
+    "com.apple.compass",             # Compass
+    "com.apple.measure",             # Measure
+    "com.apple.findmy",              # Find My
+    "com.apple.Fitness",             # Fitness
+    "com.apple.Translate",           # Translate
+    "com.apple.Bridge",              # Watch
+}
 
 # Named iOS hardware buttons -> (usage_page, usage_code, hold_seconds).
 # Mirrors pymobiledevice3's own `developer core-device hid button` mapping:
@@ -306,7 +402,18 @@ class CmdHandler(http.server.BaseHTTPRequestHandler):
                     APPS_STATE["list"] = lst
             with APPS_LOCK:
                 lst = APPS_STATE["list"] or []
-            self._json_response(200, {"apps": lst})
+            self._json_response(200, {"apps": [
+                {"bundleId": e["bundleId"], "name": e["name"]} for e in lst
+            ]})
+            return
+
+        if path == "/apps/running.json":
+            try:
+                running = run_on_loop(_running_apps_async())
+            except Exception as e:
+                self._json_response(502, {"error": f"process list unavailable: {e}"})
+                return
+            self._json_response(200, {"running": running})
             return
 
         if path.startswith("/icon/") and path.endswith(".png"):
@@ -378,6 +485,30 @@ class CmdHandler(http.server.BaseHTTPRequestHandler):
             while not ws.closed:
                 _time.sleep(0.25)
             self.close_connection = True
+            return
+        self.send_error(404)
+
+    def do_POST(self):
+        path = self.path.split("?")[0]
+        if path.startswith("/app/launch/"):
+            bid = urllib.parse.unquote(path[len("/app/launch/"):])
+            try:
+                run_on_loop(_launch_app_async(bid))
+            except Exception as e:
+                self._json_response(502, {"error": f"launch failed: {e}"})
+                return
+            print(f"[ius] launch {bid}")
+            self._json_response(200, {"ok": True})
+            return
+        if path.startswith("/app/kill/"):
+            try:
+                pid = int(urllib.parse.unquote(path.rsplit("/", 1)[1]))
+                run_on_loop(_kill_pid_async(pid))
+            except Exception as e:
+                self._json_response(502, {"error": f"kill failed: {e}"})
+                return
+            print(f"[ius] kill pid {pid}")
+            self._json_response(200, {"ok": True})
             return
         self.send_error(404)
 
