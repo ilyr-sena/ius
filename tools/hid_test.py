@@ -480,13 +480,15 @@ _KEY_MAP = {"Backspace": KEY_BACKSPACE, "Enter": KEY_ENTER}
 
 
 async def _hid_send_usages(codes):
-    hid, kbd = ACTION_CTX["hid"], ACTION_CTX["kbd_id"]
-    if hid is None or kbd is None:
+    hid = ACTION_CTX["hid"]
+    kbd = ACTION_CTX["kbd_id"]
+    slock = ACTION_CTX["send_lock"]
+    if hid is None or kbd is None or slock is None:
         return False
-    async with ACTION_CTX["send_lock"]:
+    async with slock:
         await hid.send_keyboard(kbd, codes)
     await asyncio.sleep(0.008)
-    async with ACTION_CTX["send_lock"]:
+    async with slock:
         await hid.send_keyboard(kbd, set())
     return True
 
@@ -775,8 +777,7 @@ async def consume_and_stream(queue, hid):
     import random
     import time as _t
 
-    send_lock = asyncio.Lock()
-    ACTION_CTX["send_lock"] = send_lock
+    send_lock = ACTION_CTX["send_lock"]
     state = {"down": False, "x": norm(0.5), "y": norm(0.5)}
     lnx = None
     lny = None
@@ -948,6 +949,7 @@ async def amain():
 
     RS["loop"] = asyncio.get_running_loop()
     RS["queue"] = asyncio.Queue()
+    ACTION_CTX["send_lock"] = asyncio.Lock()
     asyncio.create_task(gesture_worker(RS["queue"]))
     asyncio.create_task(wda_writer())
 
