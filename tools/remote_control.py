@@ -84,37 +84,80 @@ async function sendActions(acts){
             acts.length + ' steps');
 }
 
-// ---- mouse -> gestures ----
-let dragging=false, moved=false, sx=0, sy=0, t0=0;
+// ---- mouse -> gestures (legacy WDA endpoints = fastest path) -------------
+let dragging=false, swiping=false, moved=false, sx=0, sy=0, lx=0, ly=0;
+let lastDragSent = 0;
 
-img.addEventListener('dragstart', ev => ev.preventDefault());
+function mapXY(ev){
+  const r = img.getBoundingClientRect();
+  const iw = img.naturalWidth || 1, ih = img.naturalHeight || 1;
+  const fx = Math.min(Math.max((ev.clientX - r.left) / r.width, 0), 1);
+  const fy = Math.min(Math.max((ev.clientY - r.top) / r.height, 0), 1);
+  return [Math.round(fx * rect.w), Math.round(fy * rect.h)];
+}
+
+async function apiWDA(method, path, body){
+  if (!await ensureSession()) return false;
+  try {
+    const [code] = await api(method, '/session/' + sid + path, body);
+    return code >= 200 && code < 300;
+  } catch(e){ setStatus('WDA error: ' + e); return false; }
+}
+
+async function tapAt(x, y){
+  setStatus('tap ' + x + ',' + y);
+  let ok = await apiWDA('POST', '/wda/tap/' + x + '/' + y);
+  if (!ok) await sendActions([mv(x, y), dn(), {type:'pause', duration:60}, up()]);
+  setStatus('tap ok (' + x + ',' + y + ')');
+}
+
+async function holdAt(x, y, ms){
+  setStatus('long-press ' + ms + 'ms');
+  let ok = await apiWDA('POST', '/wda/touchAndHold', {x, y, duration: ms / 1000});
+  if (!ok) await sendActions([mv(x, y), dn(), {type:'pause', duration: ms}, up()]);
+  setStatus('hold done');
+}
+
+async function dragSeg(x1, y1, x2, y2, durS){
+  return apiWDA('POST', '/wda/dragfromtoforduration',
+                {fromX:x1, fromY:y1, toX:x2, toY:y2, duration:durS});
+}
+
 img.addEventListener('mousedown', ev => {
   if (ev.button !== 0) return;
   ev.preventDefault();
-  [sx, sy] = mapXY(ev); dragging = true; moved = false; t0 = performance.now();
+  [sx, sy] = mapXY(ev);
+  lx = sx; ly = sy;
+  dragging = true; swiping = false; moved = false;
 });
 window.addEventListener('mousemove', ev => {
   if (!dragging) return;
   const [x, y] = mapXY(ev);
-  if (Math.hypot(x - sx, y - sy) > 6) moved = true;
+  if (!swiping && Math.hypot(x - sx, y - sy) > 10) {
+    swiping = true; moved = true;
+    setStatus('dragging...');
+  }
+  if (swiping) {
+    const now = performance.now();
+    if (now - lastDragSent >= 120) {
+      lastDragSent = now;
+      dragSeg(lx, ly, x, y, 0.12);
+      lx = x; ly = y;
+    }
+  }
 });
 window.addEventListener('mouseup', async ev => {
   if (!dragging) return;
   dragging = false;
   const [ex, ey] = mapXY(ev);
-  if (!await ensureSession()) return;
-  const held = Math.min(800, Math.max(60, Math.round(performance.now() - t0)));
-  let acts;
-  if (!moved) {
-    acts = [mv(sx, sy), dn(), {type:'pause', duration: held}, up()];
-  } else {
-    const n = 24;
-    acts = [mv(sx, sy), dn()];
-    for (let i = 1; i < n; i++)
-      acts.push(mv(sx + (ex-sx)*i/n, sy + (ey-sy)*i/n, Math.max(4, Math.round(320/n))));
-    acts.push(mv(ex, ey, 30)); acts.push(up());
+  const heldMs = Math.round(performance.now() - t0);
+  if (swiping) {
+    await dragSeg(lx, ly, ex, ey, 0.15);
+    setStatus('swipe done');
+    return;
   }
-  await sendActions(acts);
+  if (heldMs > 550) { await holdAt(ex, ey, Math.min(2000, heldMs)); return; }
+  await tapAt(ex, ey);
 });
 
 // ---- buttons ---------------------------------------------------------------
