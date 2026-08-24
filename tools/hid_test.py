@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Minimal native-HID remote - persistent 60Hz contact-stream edition.
 
-Run:   python3 tools/hid_test.py
+Run:   PYTHONUNBUFFERED=1 python3 tools/hid_test.py
 Open:  http://127.0.0.1:9001/
 """
 import asyncio
@@ -21,15 +21,11 @@ from pymobiledevice3.remote.core_device.hid_service import (
 from pymobiledevice3.remote.remote_service_discovery import (
     RemoteServiceDiscoveryService,
 )
-from pymobiledevice3.remote.tunnel_service import (
-    get_remote_pairing_tunnel_services,
-    start_tunnel_over_remotepairing,
-)
 from pymobiledevice3.tunneld.api import get_tunneld_devices
 
 UDID = "00008110-000C694914F3801E"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
-STREAM_HZ = 60                     # contact-sample cadence while a finger is down
+STREAM_HZ = 60                     # digitizer sample cadence while finger down
 
 PAGE = """<!doctype html>
 <html><head><meta charset="utf-8"><title>HID test pad</title>
@@ -68,7 +64,6 @@ function dot(fx,fy,rel){
   pad.appendChild(d); setTimeout(()=>d.remove(),1200);
 }
 async function send(o){
-  if (ws.readyState !== 1) return;   // not open yet - nothing to deliver
   try{ ws.send(JSON.stringify(o)); }catch(e){ log('[send failed] '+e); }
 }
 
@@ -113,9 +108,6 @@ class MiniWS:
         self.sock = sock
         self.lock = threading.Lock()
         self.closed = False
-
-    def send_text(self, t: str):
-        self._frame(0x1, t.encode())
 
     def _frame(self, op: int, payload: bytes):
         with self.lock:
@@ -221,7 +213,7 @@ class CmdHandler(http.server.BaseHTTPRequestHandler):
                     f"Sec-WebSocket-Accept: {accept}\r\n\r\n")
             self.wfile.write(resp.encode())
             self.wfile.flush()
-            self.close_connection = False   # socket now belongs to the ws layer
+            self.close_connection = False   # socket belongs to the ws layer now
             ws = MiniWS(self.connection)
 
             def on_message(op, payload):
@@ -241,12 +233,12 @@ class CmdHandler(http.server.BaseHTTPRequestHandler):
                                       daemon=True)
             reader.start()
 
-            # park this handler thread: the socket belongs to the ws layer
-            # now, and the base class must not touch or close it
+            # park this handler thread; base class must not touch/close socket
             import time as _time
             while not ws.closed:
                 _time.sleep(0.25)
             self.close_connection = True
+            return
         self.send_error(404)
 
     def log_message(self, *a):
@@ -280,9 +272,8 @@ async def gesture_worker(queue):
 async def consume_and_stream(queue, hid):
     """Finger state machine: desired position updated by websocket events;
     a 60 Hz loop streams CONTACT samples continuously while down - exactly
-    like a real digitizer (constant cadence, zero-velocity while still)."""
+    like a real digitizer (constant cadence, zero velocity while still)."""
     state = {"down": False, "x": 0, "y": 0}
-    dirty = asyncio.Event()
 
     async def consumer():
         while True:
@@ -292,14 +283,11 @@ async def consume_and_stream(queue, hid):
                 state["x"] = norm(job["fx"])
                 state["y"] = norm(job["fy"])
                 state["down"] = True
-                dirty.set()
             elif kind == "move":
                 state["x"] = norm(job["fx"])
                 state["y"] = norm(job["fy"])
-                dirty.set()
             elif kind == "release":
                 state["down"] = False
-                dirty.set()
                 x, y = norm(job["fx"]), norm(job["fy"])
                 await hid.send_touchscreen(TOUCHSCREEN_STATE_RELEASE, x, y)
                 print("[ius] finger up")
