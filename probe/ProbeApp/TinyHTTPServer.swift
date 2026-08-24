@@ -115,6 +115,8 @@ private func wsSHA1(_ data: Data) -> Data {
 final class WebSocketConn {
     let conn: NWConnection
     let onClose: () -> Void
+    /// Client text/binary frames: (isText, payload)
+    var onMessage: ((Bool, Data) -> Void)?
 
     private let lock = NSLock()
     private var outbox: [Data] = []
