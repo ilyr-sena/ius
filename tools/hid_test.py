@@ -25,6 +25,7 @@ from pymobiledevice3.remote.tunnel_service import (
     get_remote_pairing_tunnel_services,
     start_tunnel_over_remotepairing,
 )
+from pymobiledevice3.tunneld.api import get_tunneld_devices
 
 UDID = "00008110-000C694914F3801E"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
