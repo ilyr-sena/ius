@@ -882,7 +882,7 @@ async def consume_and_stream(queue, hid):
                 print("[ius] finger up")
             elif kind == "action":
                 await perform_action(str(job.get("name") or ""))
-            elif kind == "wda":
+            elif kind == "hid" or kind == "wda":
                 WDA_QUEUE.put_nowait(job)   # gestures never wait on typing
 
     task = asyncio.create_task(consumer())
