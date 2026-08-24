@@ -501,17 +501,33 @@ WDA_QUEUE = asyncio.Queue()
 _KEY_MAP = {"Backspace": KEY_BACKSPACE, "Enter": KEY_ENTER}
 
 
+_MOD_USAGES = {0xE0, 0xE1, 0xE2, 0xE3, 0xE4, 0xE5, 0xE6, 0xE7}
+
+
 async def _hid_send_usages(codes):
+    """Real keyboards announce modifier transitions in their own frames;
+    dtuhidd tracks them the same way, so shift must lead the key report."""
     hid = ACTION_CTX["hid"]
     kbd = ACTION_CTX["kbd_id"]
     slock = ACTION_CTX["send_lock"]
     if hid is None or kbd is None or slock is None:
         return False
-    async with slock:
-        await hid.send_keyboard(kbd, codes)
+    mods = codes & _MOD_USAGES
+    keys = codes - _MOD_USAGES
+
+    async def send(frame):
+        async with slock:
+            await hid.send_keyboard(kbd, frame)
+
+    if mods:
+        await send(mods)
+        await asyncio.sleep(0.008)
+    if keys:
+        await send(codes)
+        await asyncio.sleep(0.008)
+        await send(mods)
     await asyncio.sleep(0.008)
-    async with slock:
-        await hid.send_keyboard(kbd, set())
+    await send(set())
     return True
 
 
@@ -571,7 +587,14 @@ async def wda_writer():
 # ---- HTTP server with WS upgrade --------------------------------------------
 
 RS = {"loop": None, "queue": None}
-ACTION_CTX = {"indigo": None, "hid": None, "kbd_id": None, "send_lock": None}
+ACTION_CTX = {
+    "indigo": None,
+    "hid": None,
+    "kbd_id": None,
+    "send_lock": None,
+    "want_kb": False,   # react typing mode armed?
+    "recycle": False,   # rebuild HID session (applies want_kb)
+}
 
 # ---- installed-apps cache (CoreDevice appservice + iconservice) --------------
 ICON_CACHE_DIR = pathlib.Path.home() / ".cache" / "ius" / "icons"
@@ -796,12 +819,15 @@ async def gesture_worker(queue):
                 try:
                     async with touch_session(rsd) as hid:
                         print("[+] GESTURES LIVE")
-                        try:
-                            ACTION_CTX["kbd_id"] = await hid.create_keyboard_service()
+                        if ACTION_CTX["want_kb"]:
+                            try:
+                                ACTION_CTX["kbd_id"] = await hid.create_keyboard_service()
+                                ACTION_CTX["hid"] = hid
+                                print(f"[+] virtual keyboard mounted ({ACTION_CTX['kbd_id']:#x})")
+                            except Exception as e:
+                                print(f"[!] keyboard surface unavailable ({e}) - typing falls back to WDA")
+                        else:
                             ACTION_CTX["hid"] = hid
-                            print(f"[+] virtual keyboard ready ({ACTION_CTX['kbd_id']:#x})")
-                        except Exception as e:
-                            print(f"[!] keyboard surface unavailable ({e}) - typing falls back to WDA")
                         await consume_and_stream(queue, hid)
                 finally:
                     ACTION_CTX["indigo"] = None
@@ -882,6 +908,16 @@ async def consume_and_stream(queue, hid):
                 print("[ius] finger up")
             elif kind == "action":
                 await perform_action(str(job.get("name") or ""))
+            elif kind == "keyboard":
+                want = bool(job.get("on"))
+                if want != ACTION_CTX["want_kb"] or (want and ACTION_CTX["kbd_id"] is None):
+                    ACTION_CTX["want_kb"] = want
+                    if ACTION_CTX["hid"] is not None:
+                        # apply immediately: rebuild session with/without surface
+                        ACTION_CTX["recycle"] = True
+                    elif want:
+                        print("[!] arm requested but no HID session yet - will mount on connect")
+                print(f"[ius] iphone keyboard {'hidden (virtual kb mounted)' if want else 'visible (virtual kb unmounted)'}")
             elif kind == "hid" or kind == "wda":
                 WDA_QUEUE.put_nowait(job)   # gestures never wait on typing
 
@@ -889,6 +925,10 @@ async def consume_and_stream(queue, hid):
     try:
         period = 1.0 / STREAM_HZ
         while True:
+            if ACTION_CTX.get("recycle"):
+                ACTION_CTX["recycle"] = False
+                print("[*] recycling HID session (keyboard unmount)")
+                raise RuntimeError("recycle requested")
             await asyncio.sleep(period)
             if not state["down"]:
                 continue
