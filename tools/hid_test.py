@@ -280,70 +280,54 @@ async def gesture_worker(queue):
 
 
 async def consume_and_stream(queue, hid):
-    """60Hz contact streamer with sensor-grade micro-jitter.
+    import time as _t
 
-    A real finger NEVER emits two identical coordinates - sensor noise always
-    wiggles a little even when perfectly still. Without that noise iOS drops
-    our duplicate samples entirely, so the fling estimator keeps seeing the
-    pre-freeze fast movement and fires a phantom swipe on lift. The jitter
-    makes held samples visible: velocity measurably decays to zero."""
-    import random
-    state = {"down": False, "fx": None, "fy": None}
+    state = {"down": False, "x": 0, "y": 0}
+    sent_count = 0
+    down_at = None
 
     async def consumer():
+        nonlocal down_at
         while True:
             job = await queue.get()
             kind = job.get("kind")
+            t = _t.monotonic()
+            print(f"[q] {kind} job @ {t:.3f}")
             if kind == "down":
-                state["fx"], state["fy"] = job["fx"], job["fy"]
+                state["x"] = norm(job["fx"])
+                state["y"] = norm(job["fy"])
                 state["down"] = True
+                down_at = t
+                print(f"[q] -> CONTACT stream begin ({state['x']},{state['y']})")
             elif kind == "move":
-                state["fx"], state["fy"] = job["fx"], job["fy"]
+                state["x"] = norm(job["fx"])
+                state["y"] = norm(job["fy"])
             elif kind == "release":
-                state["down"] = False                   # stop the 60Hz streamer
-                fx = state["fx"] if state["fx"] is not None else job["fx"]
-                fy = state["fy"] if state["fy"] is not None else job["fy"]
-                x, y = norm(fx), norm(fy)
-
-                freeze = t - (kin.lt or t)
-                decay = 0.82 ** max(0.0, freeze / 0.015)
-                vx = kin.vx * decay
-                vy = kin.vy * decay
-                speed = (vx*vx + vy*vy) ** 0.5
-
-                if freeze < 0.15 or speed < 0.05:
-                    # genuine flick released mid-motion: iOS momentum takes over
-                    await hid.send_touchscreen(TOUCHSCREEN_STATE_RELEASE, x, y)
-                    print("[ius] finger up - momentum!")
-                    continue
-
-                # frozen lift: the stale velocity would phantom-fling on this
-                # release... so lift, then immediately re-touch+lift at the
-                # same point - the tap cancels the momentum -> stops in place
-                print("[ius] frozen lift - momentum-cancel tap")
-                await hid.send_touchscreen(TOUCHSCREEN_STATE_RELEASE, x, y)
-                await asyncio.sleep(0.09)          # let the lift register fully
-                await hid.send_touchscreen(TOUCHSCREEN_STATE_CONTACT, x, y)
-                await asyncio.sleep(0.09)          # distinct touch duration
-                await hid.send_touchscreen(TOUCHSCREEN_STATE_RELEASE, x, y)
-                await asyncio.sleep(0.04)
-                # safety: re-assert release in case a report dropped
-                await hid.send_touchscreen(TOUCHSCREEN_STATE_RELEASE, x, y)
-                print("[ius] stopped in place")
+                state["down"] = False
+                state["x"] = norm(job["fx"])
+                state["y"] = norm(job["fy"])
+                await hid.send_touchscreen(TOUCHSCREEN_STATE_RELEASE,
+                                           state["x"], state["y"])
+                n = _t.monotonic()
+                print(f"[q] RELEASE sent @ {n:.3f} "
+                      f"(held {n-down_at if down_at else 0:.3f}s)")
 
     task = asyncio.create_task(consumer())
     try:
         period = 1.0 / STREAM_HZ
+        tick = 0
         while True:
             await asyncio.sleep(period)
+            tick += 1
             if state["down"]:
-                # sensor noise: never emit two identical coordinates
-                jx = norm(state["fx"]) + random.randint(-2, 2)
-                jy = norm(state["fy"]) + random.randint(-2, 2)
-                jx = max(0, min(65535, jx)); jy = max(0, min(65535, jy))
-                await hid.send_touchscreen(TOUCHSCREEN_STATE_CONTACT, jx, jy)
+                await hid.send_touchscreen(TOUCHSCREEN_STATE_CONTACT,
+                                           state["x"], state["y"])
+                sent_count += 1
+                if sent_count % 30 == 1:
+                    print(f"[s] contact #{sent_count} @ {_t.monotonic():.3f}")
     finally:
         task.cancel()
+        print(f"[s] streamer stopped, total contacts sent: {sent_count}")
 
 
 def norm(v):
