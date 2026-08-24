@@ -48,9 +48,12 @@ PAGE = """<!doctype html>
 <script>
 const pad=document.getElementById('pad'),ro=document.getElementById('readout'),
       lg=document.getElementById('log');
-let dragging=false,sx=0,sy=0,lx=0,ly=0,t0=0;
-window.onerror=(m)=>{ log('JS ERROR: '+m); };
+let dragging=false,sx=0,sy=0,lastSent=0,t0=0;
 
+window.onerror=(m)=>{ log('JS ERROR: '+m); };
+function log(t){
+  const li=document.createElement('div');li.textContent=t;lg.prepend(li);
+}
 function frac(ev){
   const r=pad.getBoundingClientRect();
   const fx=Math.min(Math.max((ev.clientX-r.left)/r.width,0),1);
@@ -62,38 +65,38 @@ function dot(fx,fy,rel){
   d.style.left=(fx*100)+'%';d.style.top=(fy*100)+'%';
   pad.appendChild(d);setTimeout(()=>d.remove(),1500);
 }
-function log(t){
-  const li=document.createElement('div');li.textContent=t;lg.prepend(li);
+async function send(o){
+  try {
+    const r=await fetch('/cmd',{method:'POST',
+      headers:{'Content-Type':'application/json'},body:JSON.stringify(o)});
+    if(!r.ok) log('[http '+r.status+']');
+  } catch(e){ log('[send failed] '+e); }
 }
-function send(o){ if(ws&&ws.readyState===1){ ws.send(JSON.stringify(o));
-  log(JSON.stringify(o)); } else log('[ws closed]'); }
 
 pad.addEventListener('mousedown',e=>{
   e.preventDefault();
-  const [fx,fy]=frac(e); sx=fx;sy=fy;lx=fx;ly=fy;
+  const [fx,fy]=frac(e); sx=fx;sy=fy;
   dragging=true;t0=performance.now();
-  dot(fx,fy,false); send({kind:'down',fx,fy});
+  dot(fx,fy,false);
+  send({kind:'down',fx,fy});
 });
 window.addEventListener('mousemove',e=>{
   const [fx,fy]=frac(e);
   ro.textContent=`fx=${fx.toFixed(3)} fy=${fy.toFixed(3)} | nx=${Math.round(fx*65535)} ny=${Math.round(fy*65535)}`;
   if(!dragging)return;
   dot(fx,fy,false);
-  if(Math.hypot(fx-lx,fy-ly)*65535>300){ send({kind:'move',fx,fy}); lx=fx;ly=fy; }
+  const now=performance.now();
+  if(Math.hypot(fx-sx,fy-sy)*65535>300 && now-lastSent>35){
+    lastSent=now; send({kind:'move',fx,fy});
+  }
 });
 window.addEventListener('mouseup',e=>{
   if(!dragging)return; dragging=false;
   const [fx,fy]=frac(e); dot(fx,fy,true);
+  send({kind:'release',fx,fy});
   const held=Math.round(performance.now()-t0);
-  const dist=Math.hypot(fx-sx,fy-sy)*100;
-  if(dist>1.5){ send({kind:'swipe',x1:sx,y1:sy,x2:fx,y2:fy,steps:24,durMs:350});
-    log(`=> SWIPE (${dist.toFixed(1)}% span, ${held}ms)`);}
-  else { send({kind:'tap',fx,fy,holdMs:held}); log(`=> TAP hold=${held}ms`);}
+  log(`gesture done (held ${held}ms)`);
 });
-
-const ws=new WebSocket('ws://'+location.host+'/cmd');
-ws.onopen=()=>setStatus('connected');
-function setStatus(t){}
 </script></body></html>
 """
 
