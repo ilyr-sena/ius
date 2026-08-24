@@ -14,6 +14,8 @@ import socket
 import threading
 
 from pymobiledevice3.remote.core_device.hid_service import (
+    HID_BUTTON_STATE_DOWN,
+    HID_BUTTON_STATE_UP,
     IndigoHIDService,
     TOUCHSCREEN_STATE_CONTACT,
     TOUCHSCREEN_STATE_RELEASE,
@@ -199,6 +201,20 @@ def read_ws_frames(sock, ws, on_message):
 # ---- HTTP server with WS upgrade --------------------------------------------
 
 RS = {"loop": None, "queue": None}
+ACTION_CTX = {"indigo": None}
+
+# Named iOS hardware buttons -> (usage_page, usage_code, hold_seconds).
+# Mirrors pymobiledevice3's own `developer core-device hid button` mapping:
+# most physical buttons live on the Consumer page (0x0C); hold time is what
+# makes iOS distinguish a tap (home/vol) from a press-and-hold action (lock).
+NAMED_BUTTONS = {
+    "home": (0x0C, 0x40, 0.05),        # Consumer / Menu
+    "lock": (0x0C, 0x30, 0.5),         # Consumer / Power, held to sleep
+    "volume-up": (0x0C, 0xE9, 0.05),
+    "volume-down": (0x0C, 0xEA, 0.05),
+    "mute": (0x0C, 0xE2, 0.05),
+    "siri": (0x0C, 0xCF, 1.0),
+}
 
 
 class CmdHandler(http.server.BaseHTTPRequestHandler):
@@ -271,9 +287,13 @@ async def gesture_worker(queue):
             indigo = IndigoHIDService(rsd)
             async with indigo as ibtn:
                 print("[+] button channel armed")
-                async with touch_session(rsd) as hid:
-                    print("[+] GESTURES LIVE")
-                    await consume_and_stream(queue, hid)
+                ACTION_CTX["indigo"] = ibtn
+                try:
+                    async with touch_session(rsd) as hid:
+                        print("[+] GESTURES LIVE")
+                        await consume_and_stream(queue, hid)
+                finally:
+                    ACTION_CTX["indigo"] = None
         except Exception as e:
             print(f"[!] dropped ({e}) - retrying in 3s")
             await asyncio.sleep(3)
@@ -300,6 +320,21 @@ async def consume_and_stream(queue, hid):
     async def send_release(x, y):
         async with send_lock:
             await hid.send_touchscreen(TOUCHSCREEN_STATE_RELEASE, x, y)
+
+    async def perform_action(name):
+        entry = NAMED_BUTTONS.get(name)
+        if entry is None:
+            print(f"[!] unknown action '{name}'")
+            return
+        indigo = ACTION_CTX["indigo"]
+        if indigo is None:
+            print("[!] no button channel - action dropped")
+            return
+        usage_page, usage_code, hold = entry
+        print(f"[ius] action: {name}")
+        await indigo.send_button(usage_page, usage_code, HID_BUTTON_STATE_DOWN)
+        await asyncio.sleep(hold)
+        await indigo.send_button(usage_page, usage_code, HID_BUTTON_STATE_UP)
 
     async def consumer():
         nonlocal lnx, lny, snx, sny, last_move_wall, settling, settled_done
@@ -332,6 +367,8 @@ async def consume_and_stream(queue, hid):
                 state["y"] = norm(job["fy"])
                 await send_release(state["x"], state["y"])
                 print("[ius] finger up")
+            elif kind == "action":
+                await perform_action(str(job.get("name") or ""))
 
     task = asyncio.create_task(consumer())
     try:
