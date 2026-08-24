@@ -13,14 +13,14 @@ PAGE = """<!doctype html>
 <html><head><meta charset="utf-8"><title>IUS remote</title>
 <style>
  body{background:#0b0b0f;color:#ddd;font-family:ui-monospace,monospace;text-align:center;margin:0;padding:10px}
- #img{max-width:96vw;max-height:86vh;border:1px solid #333;cursor:crosshair;background:#000}
+ #img{user-select:none;-webkit-user-drag:none;max-width:96vw;max-height:86vh;border:1px solid #333;cursor:crosshair;background:#000}
  #s{margin-top:8px;font-size:13px;opacity:.85}
  button{font-family:inherit;background:#222;color:#ddd;border:1px solid #444;padding:4px 10px;margin:2px}
  input{width:70px}
 </style></head>
 <body>
 <h3>IUS remote (MJPEG + WDA)</h3>
-<img id="img" src="http://127.0.0.1:9100/stream?fps=20&scale=0.6&q=0.45">
+<img id="img" draggable="false" src="http://127.0.0.1:9100/stream?fps=20&scale=0.6&q=0.45">
 <div id="s">initializing...</div>
 <div>
  Home <button data-k="home">home</button>
@@ -67,13 +67,16 @@ function mapXY(ev){
   return [Math.round(fx * rect.w), Math.round(fy * rect.h)];
 }
 
-const mv = (x,y,d)=>({type:'pointerMove', x:Math.round(x), y:Math.round(y), duration:d||0});
+const mv = (x,y,d)=>({type:'pointerMove', x:Math.round(x), y:Math.round(y),
+                      duration:d||0, origin:'viewport'});
 const dn = ()=>({type:'pointerDown', button:0});
 const up = ()=>({type:'pointerUp', button:0});
+const SRC = [{type:'pointer', id:'ius-finger', parameters:{pointerType:'touch'}}];
 
 async function sendActions(acts){
   if (!await ensureSession()) return;
-  const [code, j] = await api('POST', '/session/' + sid + '/actions', {actions: acts});
+  const [code, j] = await api('POST', '/session/' + sid + '/actions',
+                                 {actions: [...SRC, ...acts]});
   setStatus((code >= 200 && code < 300 ? 'ok' : 'http ' + code) + ': ' +
             acts.length + ' steps');
 }
@@ -81,8 +84,10 @@ async function sendActions(acts){
 // ---- mouse -> gestures ----
 let dragging=false, moved=false, sx=0, sy=0, t0=0;
 
+img.addEventListener('dragstart', ev => ev.preventDefault());
 img.addEventListener('mousedown', ev => {
   if (ev.button !== 0) return;
+  ev.preventDefault();
   [sx, sy] = mapXY(ev); dragging = true; moved = false; t0 = performance.now();
 });
 window.addEventListener('mousemove', ev => {
