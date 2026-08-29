@@ -34,6 +34,78 @@ import threading
 import time
 import urllib.parse
 
+# ── terminal formatting ──────────────────────────────────────────────────────
+
+_SUPPORTS_COLOR = hasattr(sys.stdout, "isatty") and sys.stdout.isatty()
+
+class _C:
+    """ANSI color helpers (no-op if piped)."""
+    if _SUPPORTS_COLOR:
+        RESET  = "\033[0m"
+        BOLD   = "\033[1m"
+        DIM    = "\033[2m"
+        CYAN   = "\033[36m"
+        GREEN  = "\033[32m"
+        YELLOW = "\033[33m"
+        RED    = "\033[31m"
+        BLUE   = "\033[34m"
+        GRAY   = "\033[90m"
+    else:
+        RESET = BOLD = DIM = CYAN = GREEN = YELLOW = RED = BLUE = GRAY = ""
+
+
+_STDOUT_LOCK = threading.Lock()
+
+def log_ok(msg: str):
+    with _STDOUT_LOCK:
+        sys.stdout.write(f"  {_C.GREEN}✓{_C.RESET}  {msg}\n")
+        sys.stdout.flush()
+
+def log_info(msg: str):
+    with _STDOUT_LOCK:
+        sys.stdout.write(f"  {_C.CYAN}●{_C.RESET}  {msg}\n")
+        sys.stdout.flush()
+
+def log_warn(msg: str):
+    with _STDOUT_LOCK:
+        sys.stdout.write(f"  {_C.YELLOW}!{_C.RESET}  {msg}\n")
+        sys.stdout.flush()
+
+def log_err(msg: str):
+    with _STDOUT_LOCK:
+        sys.stdout.write(f"  {_C.RED}✗{_C.RESET}  {msg}\n")
+        sys.stdout.flush()
+
+def log_step(msg: str):
+    with _STDOUT_LOCK:
+        sys.stdout.write(f"  {_C.GRAY}→{_C.RESET}  {msg}\n")
+        sys.stdout.flush()
+
+
+# ── throttle helper for high-frequency events ────────────────────────────────
+
+class _Throttle:
+    """Rate-limited logger – prints at most once per `interval` seconds."""
+    def __init__(self, interval: float = 0.5):
+        self._interval = interval
+        self._last = 0.0
+
+    def __call__(self, msg: str):
+        now = time.monotonic()
+        if now - self._last >= self._interval:
+            self._last = now
+            log_step(msg)
+
+
+# ── suppress noisy third-party logs ──────────────────────────────────────────
+
+import logging as _logging
+_logging.basicConfig(level=_logging.WARNING)
+for _name in ("uvicorn", "uvicorn.error", "uvicorn.access",
+              "pymobiledevice3", "pymobiledevice3.tunneld"):
+    _logging.getLogger(_name).setLevel(_logging.WARNING)
+
+
 # ── root-drop if launched via sudo by mistake ────────────────────────────────
 if os.name == "posix" and os.geteuid() == 0 and os.environ.get("SUDO_USER"):
     import pwd
@@ -76,6 +148,7 @@ WDA_BASE = "http://127.0.0.1:8100"
 WDA_BUNDLE_ID = os.environ.get(
     "IUS_WDA_BUNDLE", "com.facebook.WebDriverAgentRunner.xctrunner.SRTHYBYH35"
 )
+IUS_PROBE_BUNDLE_ID = "dev.ius.probe.app.SRTHYBYH35"
 
 ICON_CACHE_DIR = pathlib.Path.home() / ".cache" / "ius" / "icons"
 
@@ -174,8 +247,11 @@ iproxy_procs = []
 def start_iproxy_tunnels():
     """Start iproxy for each port pair."""
     for hp, dp in IPROXY_PORTS:
-        print(f"[*] iproxy {hp} -> {dp}")
-        iproxy_procs.append(subprocess.Popen(["iproxy", str(hp), str(dp)]))
+        iproxy_procs.append(subprocess.Popen(
+            ["iproxy", str(hp), str(dp)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        ))
+    log_ok(f"iproxy tunnels {', '.join(f'{h}→{d}' for h, d in IPROXY_PORTS)}")
 
 
 def stop_iproxy_tunnels():
@@ -204,7 +280,7 @@ def _port_open(port):
 def _ensure_tunneld():
     global tunneld_proc
     if _port_open(TUNNELD_PORT):
-        print("[*] tunneld already running")
+        log_ok("tunneld already running")
         return
     import site as _site
     user_site = _site.getusersitepackages()
@@ -213,8 +289,11 @@ def _ensure_tunneld():
         f"exec {shlex.quote(sys.executable)} "
         f"-m pymobiledevice3 remote tunneld"
     )
-    print(f"[*] starting tunneld via sudo (PYTHONPATH={user_site})...")
-    tunneld_proc = subprocess.Popen(["sudo", "sh", "-c", inner])
+    log_info("starting tunneld…")
+    tunneld_proc = subprocess.Popen(
+        ["sudo", "sh", "-c", inner],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
 
 
 async def _wait_tunneld(timeout_s=120):
@@ -223,19 +302,18 @@ async def _wait_tunneld(timeout_s=120):
     while loop.time() < deadline:
         if tunneld_proc is not None and tunneld_proc.poll() is not None:
             raise SystemExit(
-                f"[!] tunneld exited early ({tunneld_proc.returncode}) - "
+                f"tunneld exited early ({tunneld_proc.returncode}) – "
                 f"start it manually: sudo python3 -m pymobiledevice3 remote tunneld"
             )
         if _port_open(TUNNELD_PORT):
-            print("[+] tunneld ready")
+            log_ok("tunneld ready")
             return
         await asyncio.sleep(0.5)
-    raise SystemExit("[!] tunneld never came up on :49151")
+    raise SystemExit("tunneld never came up on :49151")
 
 
 def stop_tunneld():
     if tunneld_proc is not None and tunneld_proc.poll() is None:
-        print("[*] stopping tunneld")
         tunneld_proc.terminate()
         try:
             tunneld_proc.wait(timeout=5)
@@ -254,32 +332,47 @@ def _wda_alive():
 
 
 def _wda_launch_runner():
-    """Launch WDA runner app on device via pymobiledevice3 CLI."""
+    """Launch WDA runner app on device via AppServiceService (non-blocking, no xcuitest)."""
     if not UDID:
-        print("[!] no UDID - cannot launch WDA")
+        log_err("no UDID – cannot launch WDA")
         return False
-    print(f"[*] launching WDA runner on {UDID[:16]}...")
+    log_info(f"launching WDA…")
+
+    async def _launch():
+        rsd = await _rsd_for_device()
+        async with AppServiceService(rsd) as svc:
+            await svc.launch_application(WDA_BUNDLE_ID)
+
     try:
-        subprocess.run(
-            [
-                "pymobiledevice3", "developer", "dvt", "xcuitest",
-                "--tunnel", UDID,
-                WDA_BUNDLE_ID,
-            ],
-            capture_output=True, text=True, timeout=30,
-        )
-    except (subprocess.TimeoutExpired, FileNotFoundError) as e:
-        print(f"[!] WDA launch command failed: {e}")
+        fut = asyncio.run_coroutine_threadsafe(_launch(), RS["loop"])
+        fut.result(timeout=30)
+    except Exception as e:
+        log_err(f"WDA launch failed: {e}")
         return False
-    # Wait for WDA HTTP server
-    deadline = time.time() + 25
+
+    # Wait for WDA HTTP server (up to 30 seconds)
+    deadline = time.time() + 30
     while time.time() < deadline:
         if _wda_alive():
-            print("[+] WDA server up")
+            log_ok("WDA ready")
             return True
         time.sleep(0.7)
-    print("[!] WDA server never came up")
+    log_warn("WDA server never came up")
     return False
+
+
+async def _launch_probe_app():
+    """Launch IUS Probe stream app after WDA is ready."""
+    if not UDID:
+        return
+    # Small delay to ensure tunnel and app service are stable
+    await asyncio.sleep(2)
+    log_info("launching IUS Probe…")
+    try:
+        await _launch_app_async(IUS_PROBE_BUNDLE_ID)
+        log_ok("IUS Probe launched")
+    except Exception as e:
+        log_warn(f"Probe launch failed (non-fatal): {e}")
 
 
 def _wda_session_id():
@@ -295,9 +388,8 @@ def _wda_session_id():
                 f"{WDA_BASE}/session/{sid}/appium/settings",
                 json={"settings": {"waitForIdleTimeout": 0}}, timeout=8)
         except Exception as e:
-            print(f"[!] wda settings tweak failed (non-fatal): {e}")
+            pass  # settings tweak is non-fatal
         WDA_STATE["session"] = sid
-        print(f"[+] wda session {sid}")
         return sid
 
 
@@ -334,20 +426,17 @@ def wda_dispatch(action, job):
         if not text:
             return
         _wda_post("/wda/keys", {"value": [text]})
-        print(f"[ius] wda type: {text!r}")
     elif action == "key":
         key = str(job.get("key") or "")
         if key == "Backspace":
             _wda_post("/wda/keys", {"value": ["\b"]})
-            print("[ius] wda key: backspace")
         elif key == "Enter":
             try:
                 _wda_post("/wda/keys", {"value": ["\n"]})
             except Exception:
                 _wda_presskey("return")
-            print("[ius] wda key: return")
         else:
-            print(f"[!] unsupported wda key '{key}'")
+            log_warn(f"unsupported wda key '{key}'")
 
 
 # ── HID helpers ──────────────────────────────────────────────────────────────
@@ -394,7 +483,6 @@ async def _input_dispatch(job):
     if job.get("kind") == "hid":
         usage = _HID_CODE_MAP.get(str(job.get("code") or ""))
         if usage is None:
-            print(f"[!] unmapped key code '{job.get('code')}'")
             return
         codes = {usage}
         if job.get("shift"):
@@ -482,7 +570,7 @@ async def _fetch_apps_async():
         if is_user:
             n_user += 1
     out.sort(key=lambda e: (0 if e.pop("user") else 1, e["name"].lower()))
-    print(f"[+] app list: {len(out)} apps ({n_user} downloaded, {len(out) - n_user} stock)")
+    log_ok(f"{len(out)} apps ({n_user} downloaded, {len(out) - n_user} stock)")
     return out
 
 
@@ -555,18 +643,17 @@ async def gesture_worker(queue):
             rsds = await get_tunneld_devices(("127.0.0.1", TUNNELD_PORT))
             rsd = next((r for r in rsds if r.udid == UDID), None)
             if rsd is None:
-                print("[!] tunneld has no matching device")
+                log_warn("tunneld has no matching device")
                 await asyncio.sleep(3)
                 continue
-            print("[+] device via tunneld")
+            log_ok("device connected")
 
             indigo = IndigoHIDService(rsd)
             async with indigo as ibtn:
-                print("[+] button channel armed")
                 ACTION_CTX["indigo"] = ibtn
                 try:
                     async with touch_session(rsd) as hid:
-                        print("[+] GESTURES LIVE")
+                        log_ok("HID gestures active")
                         if ACTION_CTX["want_kb"]:
                             try:
                                 ACTION_CTX["kb_attempt"] += 1
@@ -576,9 +663,8 @@ async def gesture_worker(queue):
                                 got = await hid.create_keyboard_service(service_id=req)
                                 ACTION_CTX["kbd_id"] = got
                                 ACTION_CTX["hid"] = hid
-                                print(f"[+] virtual keyboard mounted (req {req:#x}, got {got:#x})")
                             except Exception as e:
-                                print(f"[!] keyboard surface unavailable ({e}) - typing falls back to WDA")
+                                log_warn(f"keyboard unavailable – falls back to WDA")
                         else:
                             ACTION_CTX["hid"] = hid
                         await consume_and_stream(queue, hid)
@@ -590,10 +676,10 @@ async def gesture_worker(queue):
             RSD_CACHE["rsd"] = None
             msg = str(e)
             if msg == "recycle requested":
-                print("[*] HID session recycled")
+                log_info("HID session recycled")
                 await asyncio.sleep(0.25)
             else:
-                print(f"[!] dropped ({msg}) - retrying in 3s")
+                log_warn(f"dropped ({msg}) – retrying")
                 await asyncio.sleep(3)
 
 
@@ -607,6 +693,8 @@ async def consume_and_stream(queue, hid):
     last_move_wall = 0.0
     settling = False
     settled_done = False
+    _finger_throttle = _Throttle(1.0)
+    _ease_throttle = _Throttle(1.0)
 
     async def send_contact(x, y):
         async with send_lock:
@@ -619,14 +707,14 @@ async def consume_and_stream(queue, hid):
     async def perform_action(name):
         entry = NAMED_BUTTONS.get(name)
         if entry is None:
-            print(f"[!] unknown action '{name}'")
+            log_warn(f"unknown action '{name}'")
             return
         indigo = ACTION_CTX["indigo"]
         if indigo is None:
-            print("[!] no button channel - action dropped")
+            log_warn("no button channel – action dropped")
             return
         usage_page, usage_code, hold = entry
-        print(f"[ius] action: {name}")
+        log_ok(f"action: {name}")
         await indigo.send_button(usage_page, usage_code, HID_BUTTON_STATE_DOWN)
         await asyncio.sleep(hold)
         await indigo.send_button(usage_page, usage_code, HID_BUTTON_STATE_UP)
@@ -661,7 +749,6 @@ async def consume_and_stream(queue, hid):
                 state["x"] = norm(job["fx"])
                 state["y"] = norm(job["fy"])
                 await send_release(state["x"], state["y"])
-                print("[ius] finger up")
             elif kind == "action":
                 await perform_action(str(job.get("name") or ""))
             elif kind == "keyboard":
@@ -671,8 +758,7 @@ async def consume_and_stream(queue, hid):
                     if ACTION_CTX["hid"] is not None:
                         ACTION_CTX["recycle"] = True
                     elif want:
-                        print("[!] arm requested but no HID session yet - will mount on connect")
-                print(f"[ius] iphone keyboard {'hidden (virtual kb mounted)' if want else 'visible (virtual kb unmounted)'}")
+                        log_warn("keyboard arm requested but no HID session yet")
             elif kind == "hid" or kind == "wda":
                 WDA_QUEUE.put_nowait(job)
 
@@ -682,7 +768,6 @@ async def consume_and_stream(queue, hid):
         while True:
             if ACTION_CTX.get("recycle"):
                 ACTION_CTX["recycle"] = False
-                print("[*] recycling HID session (keyboard unmount)")
                 raise RuntimeError("recycle requested")
             await asyncio.sleep(period)
             if not state["down"]:
@@ -697,7 +782,7 @@ async def consume_and_stream(queue, hid):
                 await send_contact(jx, jy)
             elif not settled_done and (abs(snx) + abs(sny)) > 60:
                 settling = True
-                print("[ius] cursor froze - easing out...")
+                _ease_throttle("easing out…")
                 gx = float(state["x"]); gy = float(state["y"])
                 sxg = snx * 0.30; syg = sny * 0.30
                 for _i in range(14):
@@ -710,14 +795,12 @@ async def consume_and_stream(queue, hid):
                 state["y"] = int(min(65535, max(0, gy)))
                 settled_done = True
                 settling = False
-                print("[ius] eased out - holding still")
             else:
                 jx = max(0, min(65535, state["x"] + random.randint(-1, 1)))
                 jy = max(0, min(65535, state["y"] + random.randint(-1, 1)))
                 await send_contact(jx, jy)
     finally:
         task.cancel()
-        print("[s] streamer stopped")
 
 
 # ── HTTP + WebSocket server ─────────────────────────────────────────────────
@@ -1009,7 +1092,7 @@ class CmdHandler(http.server.BaseHTTPRequestHandler):
             except Exception as e:
                 self._json_response(502, {"error": f"launch failed: {e}"})
                 return
-            print(f"[ius] launch {bid}")
+            log_ok(f"launched {bid.rsplit('.', 1)[-1]}")
             self._json_response(200, {"ok": True})
             return
         if path.startswith("/app/kill/"):
@@ -1019,7 +1102,7 @@ class CmdHandler(http.server.BaseHTTPRequestHandler):
             except Exception as e:
                 self._json_response(502, {"error": f"kill failed: {e}"})
                 return
-            print(f"[ius] kill pid {pid}")
+            log_ok(f"killed pid {pid}")
             self._json_response(200, {"ok": True})
             return
         self.send_error(404)
@@ -1045,22 +1128,33 @@ async def amain():
     # ── detect device ────────────────────────────────────────────────────
     UDID = udid_arg or detect_udid()
     if not UDID:
-        print("[!] no device detected - is it connected via USB?")
-        print("    try: idevice_id -l")
-        print("    or:  python3 tools/ius.py --udid <UDID>")
+        log_err("no device detected – is it connected via USB?")
+        log_info("try: idevice_id -l")
         sys.exit(1)
-    print(f"[*] device: {UDID}")
+    log_info(f"device {UDID[:16]}…")
+
+    # ── set up event loop reference (needed by queue + HTTP server) ─────
+    RS["loop"] = asyncio.get_running_loop()
+    RS["queue"] = asyncio.Queue()
+    ACTION_CTX["send_lock"] = asyncio.Lock()
+
+    # ── start HTTP server FIRST ─────────────────────────────────────────
+    # WS can connect immediately — events queue up until gesture_worker is ready.
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 9001), CmdHandler)
+    _http_thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    _http_thread.start()
+    log_ok("HTTP server :9001")
 
     # ── mount developer image ────────────────────────────────────────────
-    print("[*] mounting developer image...")
+    log_step("mounting developer image…")
     try:
         subprocess.run(
             [sys.executable, "-m", "pymobiledevice3", "mounter", "auto-mount"],
             capture_output=True, text=True, timeout=60,
         )
-        print("[+] developer image mounted")
+        log_ok("developer image mounted")
     except (subprocess.TimeoutExpired, FileNotFoundError) as e:
-        print(f"[!] auto-mount failed (non-fatal): {e}")
+        log_warn(f"auto-mount failed (non-fatal): {e}")
 
     # ── start iproxy tunnels ─────────────────────────────────────────────
     start_iproxy_tunnels()
@@ -1069,19 +1163,32 @@ async def amain():
     _ensure_tunneld()
     await _wait_tunneld()
 
-    # ── launch WDA on device ─────────────────────────────────────────────
+    # ── launch WDA on device (background) ────────────────────────────────
+    # Uses launch_application() NOT xcuitest — doesn't grab startmediastream.
     if not skip_wda:
-        if _wda_alive():
-            print("[+] WDA already running")
-        else:
-            _wda_launch_runner()
+        async def _launch_wda_bg():
+            if _wda_alive():
+                log_ok("WDA already running")
+                return
+            ok = await asyncio.get_event_loop().run_in_executor(None, _wda_launch_runner)
+            if ok:
+                log_ok("WDA ready")
+        RS["loop"].create_task(_launch_wda_bg())
 
     # ── boot HID controller ──────────────────────────────────────────────
-    RS["loop"] = asyncio.get_running_loop()
-    RS["queue"] = asyncio.Queue()
-    ACTION_CTX["send_lock"] = asyncio.Lock()
+    # MUST start gestures BEFORE probe — touch_session needs startmediastream
+    # which conflicts with IUS Probe's screen capture.
     asyncio.create_task(gesture_worker(RS["queue"]))
     asyncio.create_task(wda_writer())
+
+    # ── wait for gestures to establish before launching probe ──────────────
+    async def _wait_gestures_then_probe():
+        for _ in range(30):
+            if ACTION_CTX.get("hid") is not None:
+                break
+            await asyncio.sleep(0.5)
+        await _launch_probe_app()
+    RS["loop"].create_task(_wait_gestures_then_probe())
 
     # ── warm app list ────────────────────────────────────────────────────
     async def warm_apps():
@@ -1089,26 +1196,47 @@ async def amain():
         try:
             lst = await _fetch_apps_async()
         except Exception as e:
-            print(f"[!] app list warmup failed: {e}")
+            log_warn(f"app list failed: {e}")
             return
         with APPS_LOCK:
             APPS_STATE["list"] = lst
+        log_ok(f"{len(lst)} apps loaded")
 
     asyncio.create_task(warm_apps())
 
-    # ── start HTTP server ────────────────────────────────────────────────
-    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 9001), CmdHandler)
-    print("[+] IUS ready")
-    print("    HID test pad : http://127.0.0.1:9001/")
-    print("    MJPEG stream : http://127.0.0.1:9100/stream?fps=15&scale=0.5&q=0.4")
-    print("    H.264 stream : http://127.0.0.1:9100/stream.html")
-    print("    WDA          : http://127.0.0.1:8100/status")
-    try:
-        await asyncio.get_running_loop().run_in_executor(None, srv.serve_forever)
-    finally:
-        print("\n[*] shutting down...")
+    # ── banner ───────────────────────────────────────────────────────────
+    line = "═" * 48
+    banner = (
+        f"\n  {line}\n"
+        f"  IUS  Integrated USB Server\n"
+        f"  {line}\n"
+        f"    HID test pad   :9001\n"
+        f"    MJPEG stream   :9100/stream\n"
+        f"    H.264 stream   :9100/stream.html\n"
+        f"    WDA            :8100/status\n"
+        f"  {line}\n"
+    )
+    with _STDOUT_LOCK:
+        sys.stdout.write(banner)
+        sys.stdout.flush()
+
+    # ── signal handling ──────────────────────────────────────────────────
+    import signal as _sig
+
+    def _shutdown(*_a):
         stop_iproxy_tunnels()
         stop_tunneld()
+        os._exit(0)
+
+    _sig.signal(_sig.SIGINT, _shutdown)
+    _sig.signal(_sig.SIGTERM, _shutdown)
+
+    # ── block forever (HTTP server runs in daemon thread) ────────────────
+    try:
+        while True:
+            await asyncio.sleep(3600)
+    except (SystemExit, asyncio.CancelledError):
+        pass
 
 
 if __name__ == "__main__":
