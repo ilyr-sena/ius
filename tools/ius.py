@@ -1051,6 +1051,17 @@ async def amain():
         sys.exit(1)
     print(f"[*] device: {UDID}")
 
+    # ── mount developer image ────────────────────────────────────────────
+    print("[*] mounting developer image...")
+    try:
+        subprocess.run(
+            [sys.executable, "-m", "pymobiledevice3", "mounter", "auto-mount"],
+            capture_output=True, text=True, timeout=60,
+        )
+        print("[+] developer image mounted")
+    except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+        print(f"[!] auto-mount failed (non-fatal): {e}")
+
     # ── start iproxy tunnels ─────────────────────────────────────────────
     start_iproxy_tunnels()
 
