@@ -3,19 +3,17 @@ use idevice::usbmuxd::UsbmuxdListenEvent;
 use tracing::{debug, error, info};
 
 use super::detect::{connect_usbmuxd, list_raw_devices};
-use super::info::enrich_device_info;
+use super::info::enrich_all;
 use super::{Device, DeviceEvent};
 
 pub async fn get_devices_snapshot() -> Result<Vec<Device>, idevice::IdeviceError> {
     let mut conn = connect_usbmuxd().await?;
     let raws = list_raw_devices(&mut conn).await?;
 
-    let mut devices = Vec::with_capacity(raws.len());
-    for raw in &raws {
-        let mut dev = Device::from_usbmuxd(raw);
-        enrich_device_info(raw, &mut dev).await;
-        devices.push(dev);
-    }
+    let mut devices: Vec<Device> = raws.iter().map(Device::from_usbmuxd).collect();
+
+    // Enrich all devices in parallel via ideviceinfo
+    enrich_all(&mut devices).await;
 
     Ok(devices)
 }
@@ -41,12 +39,13 @@ async fn run_watch_loop(
 
     // snapshot existing devices
     let raws = list_raw_devices(&mut conn).await?;
+    let mut devices: Vec<Device> = raws.iter().map(Device::from_usbmuxd).collect();
+    enrich_all(&mut devices).await;
+
     let mut known: std::collections::HashMap<u32, Device> = std::collections::HashMap::new();
-    for raw in &raws {
-        let mut dev = Device::from_usbmuxd(raw);
-        enrich_device_info(raw, &mut dev).await;
+    for dev in devices {
         on_event(DeviceEvent::Connected(dev.clone()));
-        known.insert(raw.device_id, dev);
+        known.insert(dev.device_id, dev);
     }
 
     debug!("entering listen loop with {} known device(s)", known.len());
@@ -57,7 +56,8 @@ async fn run_watch_loop(
             Ok(UsbmuxdListenEvent::Connected(raw)) => {
                 info!("device connected: {}", raw.udid);
                 let mut dev = Device::from_usbmuxd(&raw);
-                enrich_device_info(&raw, &mut dev).await;
+                // Enrich single device
+                super::info::enrich_device_info(&mut dev).await;
                 on_event(DeviceEvent::Connected(dev.clone()));
                 known.insert(raw.device_id, dev);
             }

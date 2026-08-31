@@ -39,7 +39,7 @@ impl Device {
             _ => ConnectionType::Usb,
         };
         Self {
-            udid: dev.udid.clone(),
+            udid: format_device_udid(&dev.udid),
             device_id: dev.device_id,
             name: None,
             model: None,
@@ -47,6 +47,19 @@ impl Device {
             build_version: None,
             connection_type,
         }
+    }
+}
+
+/// Format USB serial number into Apple's standard UDID format.
+/// USB serial: "00008110000C694914F3801E"
+/// Apple UDID: "00008110-000C694914F3801E"
+fn format_device_udid(raw: &str) -> String {
+    let trimmed = raw.trim().trim_end_matches('\0');
+    if trimmed.len() == 24 && !trimmed.contains('-') {
+        // Insert dash after 8th character: AAAAAAAA-BBBBBBBB
+        format!("{}-{}", &trimmed[..8], &trimmed[8..])
+    } else {
+        trimmed.to_string()
     }
 }
 
