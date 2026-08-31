@@ -4,3 +4,6 @@ __pycache__/
 .DS_Store
 build/
 DerivedData/
+target/
+8100/
+9100/
