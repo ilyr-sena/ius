@@ -130,11 +130,20 @@ async fn cmd_info(udid: &str) {
 }
 
 async fn start_daemon_if_needed() {
-    // Check if our daemon socket already exists
     let sock = std::path::Path::new("/tmp/meridian-relay-usbmuxd.sock");
+
+    // If socket exists, verify daemon is actually alive
     if sock.exists() {
-        info!("daemon already running");
-        return;
+        match tokio::net::UnixStream::connect(sock).await {
+            Ok(_) => {
+                info!("daemon already running");
+                return;
+            }
+            Err(_) => {
+                warn!("stale daemon socket found, cleaning up");
+                let _ = std::fs::remove_file(sock);
+            }
+        }
     }
 
     info!("starting usbmuxd daemon in background");
