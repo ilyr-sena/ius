@@ -124,7 +124,7 @@ fn enumerate_apple_devices() -> Vec<RawUsbDevice> {
         let udid = match device.open() {
             Ok(handle) => {
                 match handle.read_serial_number_string_ascii(&desc) {
-                    Ok(s) if !s.is_empty() => s,
+                    Ok(s) if !s.is_empty() => s.trim().trim_end_matches('\0').to_string(),
                     _ => {
                         debug!("Apple device without serial, skipping");
                         continue;

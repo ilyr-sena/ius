@@ -1,6 +1,7 @@
 use std::sync::{Arc, RwLock};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
+use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use super::device_scanner::{DeviceScanner, DeviceChange};
@@ -115,19 +116,31 @@ pub async fn handle_client(
                     Ok(sport) => {
                         info!("connection established: device_id={device_id} sport={sport}");
 
-                        // Send success response to client
                         let resp = protocol::make_result_response(packet.tag, 0);
                         if let Err(e) = resp.write_to(&mut stream).await {
                             warn!("failed to write connect response: {e}");
                             return;
                         }
 
-                        // Enter bidirectional proxy loop
+                        let data_tx = {
+                            let devices = device_manager.devices.read().await;
+                            devices.get(&device_id).map(|d| d.data_tx.clone())
+                        };
+
+                        let data_tx = match data_tx {
+                            Some(tx) => tx,
+                            None => {
+                                warn!("device {device_id} not found for proxy");
+                                return;
+                            }
+                        };
+
                         if let Err(e) = proxy_connection(
                             &mut stream,
                             &device_manager.conn_mgr,
                             device_id,
                             sport,
+                            data_tx,
                         ).await {
                             debug!("proxy ended: {e}");
                         }
@@ -219,11 +232,14 @@ async fn proxy_connection(
     conn_mgr: &ConnectionManager,
     device_id: u32,
     sport: u16,
+    data_tx: mpsc::Sender<(u16, Vec<u8>)>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let notify = conn_mgr.get_data_notify(device_id, sport).await
+        .ok_or("connection not found")?;
+
     let mut client_buf = [0u8; 65536];
 
     loop {
-        // Check for data from device (in ib_buf) first
         let data_to_client = {
             let devices = conn_mgr.devices.read().await;
             if let Some(device) = devices.get(&device_id) {
@@ -247,7 +263,6 @@ async fn proxy_connection(
         if let Some(data) = data_to_client {
             stream.write_all(&data).await?;
             debug!("proxy: wrote {} bytes to client", data.len());
-            // Clear the buffer
             let mut devices = conn_mgr.devices.write().await;
             if let Some(device) = devices.get_mut(&device_id) {
                 if let Some(conn) = device.connections.get_mut(&sport) {
@@ -257,49 +272,23 @@ async fn proxy_connection(
             continue;
         }
 
-        // Try to read from client (with timeout)
-        match tokio::time::timeout(
-            std::time::Duration::from_millis(10),
-            stream.read(&mut client_buf),
-        ).await {
-            Ok(Ok(0)) => return Ok(()),
-            Ok(Ok(n)) => {
-                let data = client_buf[..n].to_vec();
-
-                // Send data to device through the connection manager
-                let devices = conn_mgr.devices.read().await;
-                if let Some(device) = devices.get(&device_id) {
-                    if let Some(conn) = device.connections.get(&sport) {
-                        let tcp_seq = conn.tx_seq;
-                        let tcp_ack = conn.tx_ack;
-                        let version = device.version;
-
-                        let _pkt = mux::build_tcp_packet(
-                            version,
-                            device.tx_seq,
-                            device.rx_seq,
-                            sport,
-                            conn.dport,
-                            tcp_seq,
-                            tcp_ack,
-                            mux::TCP_ACK,
-                            (mux::INITIAL_WINDOW >> 8) as u16,
-                            Some(&data),
-                        );
-
-                        debug!("proxy: sending {} bytes to device {} sport={}", data.len(), device_id, sport);
-                        // Note: actual USB send is handled by the device task
+        tokio::select! {
+            _ = notify.notified() => {}
+            result = stream.read(&mut client_buf) => {
+                match result {
+                    Ok(0) => return Ok(()),
+                    Ok(n) => {
+                        let data = client_buf[..n].to_vec();
+                        info!("proxy: client sent {} bytes to device {} sport={}", data.len(), device_id, sport);
+                        if let Err(e) = data_tx.send((sport, data)).await {
+                            return Err(format!("data channel send failed: {e}").into());
+                        }
                     }
+                    Err(e) => return Err(e.into()),
                 }
-            }
-            Ok(Err(e)) if e.kind() == std::io::ErrorKind::WouldBlock => {}
-            Ok(Err(e)) => return Err(e.into()),
-            Err(_) => {
-                // Timeout, continue loop
             }
         }
 
-        // Small yield to prevent busy loop
         tokio::task::yield_now().await;
     }
 }

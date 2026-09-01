@@ -430,6 +430,7 @@ pub struct MuxConnection {
     pub max_payload: usize,
     pub last_ack_time: Instant,
     pub tag: u32,
+    pub data_notify: Arc<tokio::sync::Notify>,
 }
 
 impl MuxConnection {
@@ -451,6 +452,7 @@ impl MuxConnection {
             max_payload: MAX_PAYLOAD,
             last_ack_time: Instant::now(),
             tag,
+            data_notify: Arc::new(tokio::sync::Notify::new()),
         }
     }
 
@@ -609,6 +611,19 @@ impl ConnectionManager {
         }
     }
 
+    pub async fn get_data_notify(&self, device_id: u32, sport: u16) -> Option<Arc<tokio::sync::Notify>> {
+        let devices = self.devices.read().await;
+        let device = devices.get(&device_id)?;
+        let conn = device.connections.get(&sport)?;
+        Some(conn.data_notify.clone())
+    }
+
+    pub async fn get_connection_version(&self, device_id: u32) -> Option<u8> {
+        let devices = self.devices.read().await;
+        let device = devices.get(&device_id)?;
+        Some(device.version)
+    }
+
     pub async fn get_device_mut(&self, device_id: u32) -> Option<tokio::sync::RwLockWriteGuard<'_, HashMap<u32, MuxDevice>>> {
         let devices = self.devices.write().await;
         if devices.contains_key(&device_id) {
@@ -714,6 +729,8 @@ impl ConnectionManager {
             }
         };
 
+        let mut notify_handles: Vec<Arc<tokio::sync::Notify>> = Vec::new();
+
         let conn = match device.connections.get_mut(&sport) {
             Some(c) => c,
             None => {
@@ -799,6 +816,7 @@ impl ConnectionManager {
                 conn.rx_recvd = conn.rx_recvd.wrapping_add(data_len);
                 conn.update_ack();
                 conn.last_ack_time = Instant::now();
+                notify_handles.push(conn.data_notify.clone());
 
                 events.push(ConnectionEvent::DataReady {
                     device_id,
@@ -826,6 +844,10 @@ impl ConnectionManager {
                     conn.tx_seq.wrapping_sub(conn.tx_acked)
                 );
             }
+        }
+
+        for notify in notify_handles {
+            notify.notify_one();
         }
 
         (events, send_queue)

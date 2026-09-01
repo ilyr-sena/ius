@@ -59,7 +59,7 @@ impl DeviceManager {
                     if desc.vendor_id() == 0x05AC {
                         if let Ok(handle) = device.open() {
                             if let Ok(serial) = handle.read_serial_number_string_ascii(&desc) {
-                                if serial.trim() == dev.udid.trim() {
+                                if serial.trim().trim_end_matches('\0') == dev.udid {
                                     found = Some(device.clone());
                                     break;
                                 }
@@ -294,47 +294,63 @@ impl DeviceManager {
         sport: u16,
         data: &[u8],
     ) {
-        let devices = conn_mgr.devices.read().await;
-        let device = match devices.get(&device_id) {
-            Some(d) => d,
-            None => {
-                warn!("send_client_data: device {device_id} not found");
+        let (pkt, data_len) = {
+            let devices = conn_mgr.devices.read().await;
+            let device = match devices.get(&device_id) {
+                Some(d) => d,
+                None => {
+                    warn!("send_client_data: device {device_id} not found");
+                    return;
+                }
+            };
+
+            let conn = match device.connections.get(&sport) {
+                Some(c) => c,
+                None => {
+                    warn!("send_client_data: sport={sport} not found on device {device_id}");
+                    return;
+                }
+            };
+
+            if conn.state != ConnState::Connected {
+                warn!("send_client_data: sport={sport} not connected on device {device_id}");
                 return;
             }
+
+            let tcp_seq = conn.tx_seq;
+            let tcp_ack = conn.tx_ack;
+            let win = (INITIAL_WINDOW >> 8) as u16;
+
+            let pkt = build_tcp_packet(
+                device.version,
+                device.tx_seq,
+                device.rx_seq,
+                sport,
+                conn.dport,
+                tcp_seq,
+                tcp_ack,
+                TCP_ACK,
+                win,
+                Some(data),
+            );
+
+            (pkt, data.len() as u32)
         };
-
-        let conn = match device.connections.get(&sport) {
-            Some(c) => c,
-            None => {
-                warn!("send_client_data: sport={sport} not found on device {device_id}");
-                return;
-            }
-        };
-
-        if conn.state != ConnState::Connected {
-            warn!("send_client_data: sport={sport} not connected on device {device_id}");
-            return;
-        }
-
-        let tcp_seq = conn.tx_seq;
-        let tcp_ack = conn.tx_ack;
-        let win = (INITIAL_WINDOW >> 8) as u16;
-
-        let pkt = build_tcp_packet(
-            device.version,
-            device.tx_seq,
-            device.rx_seq,
-            sport,
-            conn.dport,
-            tcp_seq,
-            tcp_ack,
-            TCP_ACK,
-            win,
-            Some(data),
-        );
 
         if let Err(e) = usb.send(&pkt) {
             warn!("failed to send TCP data for device {device_id} sport={sport}: {e}");
+            return;
+        }
+
+        info!("sent {} bytes TCP data on device {device_id} sport={sport}", data.len());
+
+        let mut devices = conn_mgr.devices.write().await;
+        if let Some(device) = devices.get_mut(&device_id) {
+            device.tx_seq = device.tx_seq.wrapping_add(1);
+            if let Some(conn) = device.connections.get_mut(&sport) {
+                conn.tx_seq = conn.tx_seq.wrapping_add(data_len);
+                conn.ob_buf.extend_from_slice(data);
+            }
         }
     }
 
