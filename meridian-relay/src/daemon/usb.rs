@@ -10,6 +10,7 @@ pub const APPLE_VENDOR_ID: u16 = 0x05AC;
 pub const USB_MRU: usize = 16384;
 pub const USB_MTU: usize = 49152;
 pub const ZLP_THRESHOLD: usize = 512;
+const MAX_REASSEMBLY_BUF: usize = 1024 * 1024; // 1MB max reassembly buffer
 
 const MUX_INTERFACE_CLASS: u8 = 0xFF;
 const MUX_INTERFACE_SUBCLASS: u8 = 0xFE;
@@ -134,9 +135,8 @@ impl AppleMuxInterface {
         match handle.claim_interface(info.interface_number) {
             Ok(()) => {}
             Err(rusb::Error::Busy) => {
-                warn!("interface {} busy (another process may hold the device), retrying after 200ms", info.interface_number);
-                std::thread::sleep(Duration::from_millis(200));
-                handle.claim_interface(info.interface_number)?;
+                warn!("interface {} busy (will retry next scan)", info.interface_number);
+                return Err(UsbError::Rusb(rusb::Error::Busy));
             }
             Err(e) => return Err(e.into()),
         }
@@ -180,6 +180,13 @@ impl AppleMuxInterface {
     pub fn receive(&self, buf: &mut [u8]) -> Result<usize> {
         let n = self.handle.read_bulk(self.ep_in, buf, USB_TIMEOUT)?;
         Ok(n)
+    }
+
+    pub async fn send_async(self: &Arc<Self>, data: Vec<u8>) -> Result<()> {
+        let iface = self.clone();
+        tokio::task::spawn_blocking(move || iface.send(&data))
+            .await
+            .map_err(|e| UsbError::TaskJoin(e.to_string()))?
     }
 
     pub fn max_packet_size(&self) -> u16 {
@@ -271,6 +278,12 @@ impl PacketReassembler {
 
     pub fn feed(&mut self, data: &[u8], expected_len: Option<usize>) -> Option<Vec<u8>> {
         if self.pktlen > 0 {
+            if self.pktbuf.len() + data.len() > MAX_REASSEMBLY_BUF {
+                warn!("reassembler buffer overflow ({} bytes), discarding", self.pktbuf.len() + data.len());
+                self.pktbuf.clear();
+                self.pktlen = 0;
+                return None;
+            }
             self.pktbuf.extend_from_slice(data);
 
             if data.len() < USB_MRU {

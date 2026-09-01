@@ -454,6 +454,8 @@ impl DeviceManager {
 
         info!("sent SYN for device {} sport={sport} dport={}", req.device_id, req.dport);
 
+        let data_notify = conn_mgr.get_data_notify(req.device_id, sport).await;
+
         let start = tokio::time::Instant::now();
         let timeout = std::time::Duration::from_secs(5);
 
@@ -464,30 +466,39 @@ impl DeviceManager {
                 return;
             }
 
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-
-            let devices = conn_mgr.devices.read().await;
-            if let Some(device) = devices.get(&req.device_id) {
-                if let Some(conn) = device.connections.get(&sport) {
-                    match conn.state {
-                        ConnState::Connected => {
-                            info!("connection established for device {} sport={sport}", req.device_id);
-                            let _ = req.resp_tx.send(Ok(sport));
-                            return;
+            {
+                let devices = conn_mgr.devices.read().await;
+                if let Some(device) = devices.get(&req.device_id) {
+                    if let Some(conn) = device.connections.get(&sport) {
+                        match conn.state {
+                            ConnState::Connected => {
+                                info!("connection established for device {} sport={sport}", req.device_id);
+                                let _ = req.resp_tx.send(Ok(sport));
+                                return;
+                            }
+                            ConnState::Refused => {
+                                warn!("connection refused for device {} sport={sport}", req.device_id);
+                                let _ = req.resp_tx.send(Err("connection refused".into()));
+                                return;
+                            }
+                            ConnState::Dead => {
+                                warn!("connection dead for device {} sport={sport}", req.device_id);
+                                let _ = req.resp_tx.send(Err("connection dead".into()));
+                                return;
+                            }
+                            _ => {}
                         }
-                        ConnState::Refused => {
-                            warn!("connection refused for device {} sport={sport}", req.device_id);
-                            let _ = req.resp_tx.send(Err("connection refused".into()));
-                            return;
-                        }
-                        ConnState::Dead => {
-                            warn!("connection dead for device {} sport={sport}", req.device_id);
-                            let _ = req.resp_tx.send(Err("connection dead".into()));
-                            return;
-                        }
-                        _ => continue,
                     }
                 }
+            }
+
+            if let Some(ref notify) = data_notify {
+                tokio::select! {
+                    _ = notify.notified() => {}
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {}
+                }
+            } else {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             }
         }
     }

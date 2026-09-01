@@ -23,6 +23,7 @@ pub enum DeviceChange {
 pub struct DeviceScanner {
     devices: Arc<RwLock<HashMap<u32, UsbDevice>>>,
     next_id: u32,
+    usb_context: Option<Context>,
 }
 
 impl DeviceScanner {
@@ -30,14 +31,28 @@ impl DeviceScanner {
         Self {
             devices: Arc::new(RwLock::new(HashMap::new())),
             next_id: 1,
+            usb_context: None,
         }
+    }
+
+    fn get_context(&mut self) -> Option<&Context> {
+        if self.usb_context.is_none() {
+            self.usb_context = Context::new().ok();
+        }
+        self.usb_context.as_ref()
     }
 
     pub fn scan(&mut self) -> Vec<DeviceChange> {
         let mut changes = Vec::new();
-        let current_devices = enumerate_apple_devices();
+        let current_devices = enumerate_apple_devices_with(self.get_context());
 
-        let mut devices = self.devices.write().unwrap();
+        let mut devices = match self.devices.write() {
+            Ok(d) => d,
+            Err(e) => {
+                warn!("scanner devices lock poisoned: {e}");
+                return Vec::new();
+            }
+        };
         let mut seen = std::collections::HashSet::new();
 
         for usb_dev in &current_devices {
@@ -80,11 +95,23 @@ impl DeviceScanner {
     }
 
     pub fn get_devices(&self) -> Vec<UsbDevice> {
-        self.devices.read().unwrap().values().cloned().collect()
+        match self.devices.read() {
+            Ok(d) => d.values().cloned().collect(),
+            Err(e) => {
+                warn!("scanner devices lock poisoned: {e}");
+                Vec::new()
+            }
+        }
     }
 
     pub fn get_device_by_id(&self, id: u32) -> Option<UsbDevice> {
-        self.devices.read().unwrap().get(&id).cloned()
+        match self.devices.read() {
+            Ok(d) => d.get(&id).cloned(),
+            Err(e) => {
+                warn!("scanner devices lock poisoned: {e}");
+                None
+            }
+        }
     }
 }
 
@@ -95,18 +122,18 @@ struct RawUsbDevice {
     usb_address: u8,
 }
 
-fn enumerate_apple_devices() -> Vec<RawUsbDevice> {
+fn enumerate_apple_devices_with(context: Option<&Context>) -> Vec<RawUsbDevice> {
     let mut devices = Vec::new();
 
-    let context: Context = match Context::new() {
-        Ok(c) => c,
-        Err(_) => {
-            warn!("failed to create rusb context");
+    let context_ref = match context {
+        Some(c) => c,
+        None => {
+            warn!("no USB context available");
             return devices;
         }
     };
 
-    let Ok(device_list) = context.devices() else {
+    let Ok(device_list) = context_ref.devices() else {
         warn!("failed to enumerate USB devices");
         return devices;
     };

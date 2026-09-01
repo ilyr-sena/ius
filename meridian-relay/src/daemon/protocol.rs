@@ -52,6 +52,12 @@ pub async fn read_packet(stream: &mut (impl AsyncReadExt + Unpin)) -> Result<Raw
     let message = u32::from_le_bytes(header[8..12].try_into().unwrap());
     let tag = u32::from_le_bytes(header[12..16].try_into().unwrap());
 
+    if size < 16 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("packet size too small: {size} bytes"),
+        ));
+    }
     let body_size = (size - 16) as usize;
     let mut body = vec![0u8; body_size];
     stream.read_exact(&mut body).await?;

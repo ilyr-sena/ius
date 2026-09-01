@@ -51,8 +51,13 @@ pub async fn handle_client(
         match message_type.as_str() {
             "ListDevices" => {
                 let devices = {
-                    let s = scanner.read().unwrap();
-                    s.get_devices()
+                    match scanner.read() {
+                        Ok(s) => s.get_devices(),
+                        Err(e) => {
+                            warn!("scanner lock poisoned: {e}");
+                            Vec::new()
+                        }
+                    }
                 };
                 info!("ListDevices: returning {} device(s)", devices.len());
                 for d in &devices {
@@ -118,10 +123,34 @@ pub async fn handle_client(
 
                 info!("Connect request: device_id={device_id} port={port}");
 
+                if device_id == 0 {
+                    warn!("Connect with invalid device_id=0");
+                    let resp = protocol::make_result_response(packet.tag, 2);
+                    if let Err(e) = resp.write_to(&mut stream).await {
+                        warn!("failed to write response: {e}");
+                        return;
+                    }
+                    continue;
+                }
+                if port == 0 {
+                    warn!("Connect with invalid port=0");
+                    let resp = protocol::make_result_response(packet.tag, 2);
+                    if let Err(e) = resp.write_to(&mut stream).await {
+                        warn!("failed to write response: {e}");
+                        return;
+                    }
+                    continue;
+                }
+
                 if port == LOCKDOWN_PORT {
                     let udid: Option<String> = {
-                        let s = scanner.read().unwrap();
-                        s.get_device_by_id(device_id).map(|d| d.udid.clone())
+                        match scanner.read() {
+                            Ok(s) => s.get_device_by_id(device_id).map(|d| d.udid.clone()),
+                            Err(e) => {
+                                warn!("scanner lock poisoned: {e}");
+                                None
+                            }
+                        }
                     };
                     if let Some(ref udid) = udid {
                         if !has_pair_record(udid) {
@@ -398,7 +427,7 @@ fn save_pair_record(udid: &str, data: &[u8]) -> Result<(), std::io::Error> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let perms = std::fs::Permissions::from_mode(0o644);
+        let perms = std::fs::Permissions::from_mode(0o600);
         std::fs::set_permissions(&plist_path, perms)?;
     }
 
@@ -461,12 +490,27 @@ fn get_or_create_buid() -> String {
 }
 
 fn rand_u64() -> u64 {
-    use std::collections::hash_map::RandomState;
-    use std::hash::{BuildHasher, Hasher};
-    let s = RandomState::new();
-    let mut h = s.build_hasher();
-    h.write_u64(0xDEADBEEF);
-    h.finish()
+    let mut buf = [0u8; 8];
+    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+        use std::io::Read;
+        let _ = f.read_exact(&mut buf);
+    } else {
+        // Fallback: timestamp + address-based hash
+        use std::hash::{BuildHasher, Hasher};
+        let s = std::collections::hash_map::RandomState::new();
+        let mut h = s.build_hasher();
+        h.write_u64(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos() as u64,
+        );
+        // Use a stack address as entropy source
+        let stack_addr = &h as *const _ as u64;
+        h.write_u64(stack_addr);
+        return h.finish();
+    }
+    u64::from_ne_bytes(buf)
 }
 
 async fn proxy_connection(
@@ -479,7 +523,7 @@ async fn proxy_connection(
     let notify = conn_mgr.get_data_notify(device_id, sport).await
         .ok_or("connection not found".to_string())?;
 
-    let mut client_buf = [0u8; 65536];
+    let mut client_buf = vec![0u8; 65536];
 
     let result = proxy_loop(stream, conn_mgr, device_id, sport, &data_tx, &notify, &mut client_buf).await;
 
@@ -503,13 +547,13 @@ async fn proxy_loop(
     sport: u16,
     data_tx: &mpsc::Sender<(u16, Vec<u8>)>,
     notify: &Arc<tokio::sync::Notify>,
-    client_buf: &mut [u8; 65536],
+    client_buf: &mut Vec<u8>,
 ) -> Result<(), String> {
     loop {
         let data_to_client = {
-            let devices = conn_mgr.devices.read().await;
-            if let Some(device) = devices.get(&device_id) {
-                if let Some(conn) = device.connections.get(&sport) {
+            let mut devices = conn_mgr.devices.write().await;
+            if let Some(device) = devices.get_mut(&device_id) {
+                if let Some(conn) = device.connections.get_mut(&sport) {
                     if conn.state == ConnState::Dead {
                         return Ok(());
                     }
@@ -517,7 +561,7 @@ async fn proxy_loop(
                         return Err("connection not connected".into());
                     }
                     if !conn.ib_buf.is_empty() {
-                        Some(conn.ib_buf.clone())
+                        Some(std::mem::take(&mut conn.ib_buf))
                     } else {
                         None
                     }
@@ -531,12 +575,6 @@ async fn proxy_loop(
 
         if let Some(data) = data_to_client {
             stream.write_all(&data).await.map_err(|e| e.to_string())?;
-            let mut devices = conn_mgr.devices.write().await;
-            if let Some(device) = devices.get_mut(&device_id) {
-                if let Some(conn) = device.connections.get_mut(&sport) {
-                    conn.ib_buf.clear();
-                }
-            }
             continue;
         }
 
@@ -545,7 +583,7 @@ async fn proxy_loop(
 
         tokio::select! {
             _ = notified => {}
-            result = stream.read(client_buf) => {
+            result = stream.read(client_buf.as_mut_slice()) => {
                 match result {
                     Ok(0) => return Ok(()),
                     Ok(n) => {

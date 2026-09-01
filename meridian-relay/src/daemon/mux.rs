@@ -709,160 +709,176 @@ impl ConnectionManager {
         tcp_hdr: &TcpHeader,
         payload: &[u8],
     ) -> (Vec<ConnectionEvent>, Vec<Vec<u8>>) {
-        let mut send_queue = Vec::new();
         let dport = tcp_hdr.dest_port();
-        let mut events = Vec::new();
-
-        let mut devices = self.devices.write().await;
-        let device = match devices.get_mut(&device_id) {
-            Some(d) => d,
-            None => {
-                warn!("tcp packet for unknown device_id={device_id}");
-                return (vec![], vec![]);
-            }
-        };
-
-        let mut matched_sport: Option<u16> = None;
         let tcp_sport = tcp_hdr.source_port();
         let tcp_dport = tcp_hdr.dest_port();
-        for (&s, conn) in &device.connections {
-            if (conn.dport == tcp_sport) && conn.state != ConnState::Dead {
-                matched_sport = Some(s);
-                break;
-            }
-            if (conn.dport == tcp_dport) && conn.state != ConnState::Dead {
-                matched_sport = Some(s);
-                break;
-            }
-        }
 
-        let sport = match matched_sport {
-            Some(s) => s,
-            None => {
-                warn!("tcp packet for unknown dport={dport} on device_id={device_id}");
-                return (vec![], vec![]);
+        // Phase 1: Read lock to find the matching connection
+        let sport = {
+            let devices = self.devices.read().await;
+            let device = match devices.get(&device_id) {
+                Some(d) => d,
+                None => {
+                    warn!("tcp packet for unknown device_id={device_id}");
+                    return (vec![], vec![]);
+                }
+            };
+
+            let mut matched_sport: Option<u16> = None;
+            for (&s, conn) in &device.connections {
+                if (conn.dport == tcp_sport) && conn.state != ConnState::Dead {
+                    matched_sport = Some(s);
+                    break;
+                }
+                if (conn.dport == tcp_dport) && conn.state != ConnState::Dead {
+                    matched_sport = Some(s);
+                    break;
+                }
+            }
+
+            match matched_sport {
+                Some(s) => s,
+                None => {
+                    warn!("tcp packet for unknown dport={dport} on device_id={device_id}");
+                    return (vec![], vec![]);
+                }
             }
         };
 
+        // Phase 2: Write lock for mutations
+        let mut send_queue = Vec::new();
+        let mut events = Vec::new();
         let mut notify_handles: Vec<Arc<tokio::sync::Notify>> = Vec::new();
 
-        let conn = match device.connections.get_mut(&sport) {
-            Some(c) => c,
-            None => {
-                warn!("tcp packet for sport={sport} but connection not found");
-                return (vec![], vec![]);
-            }
-        };
-
-        if tcp_hdr.has_flag(TCP_RST) {
-            debug!("received RST on sport={sport}");
-            let reason = if !payload.is_empty() {
-                String::from_utf8_lossy(payload).to_string()
-            } else {
-                String::new()
-            };
-            if !reason.is_empty() {
-                info!("RST reason: {reason}");
-            }
-            conn.state = ConnState::Dead;
-            events.push(ConnectionEvent::Disconnected {
-                device_id,
-                sport,
-            });
-            return (events, send_queue);
-        }
-
-        if conn.state == ConnState::Connecting {
-            if tcp_hdr.has_flag(TCP_SYN) && tcp_hdr.has_flag(TCP_ACK) {
-                debug!("received SYN|ACK on sport={sport}, sending ACK");
-                let peer_seq = tcp_hdr.seq();
-                let our_ack = peer_seq.wrapping_add(1);
-                let our_seq = conn.tx_seq;
-
-                conn.tx_seq = our_seq.wrapping_add(1);
-                conn.tx_ack = our_ack;
-                conn.rx_seq = peer_seq.wrapping_add(1);
-                conn.rx_recvd = our_ack;
-                conn.state = ConnState::Connected;
-                conn.last_ack_time = Instant::now();
-
-                let ack_pkt = build_tcp_packet(
-                    device.version,
-                    device.tx_seq,
-                    device.rx_seq,
-                    sport,
-                    dport,
-                    our_seq,
-                    our_ack,
-                    TCP_ACK,
-                    (INITIAL_WINDOW >> 8) as u16,
-                    None,
-                );
-                send_queue.push(ack_pkt);
-                device.tx_seq = device.tx_seq.wrapping_add(1);
-
-                events.push(ConnectionEvent::Connected {
-                    device_id,
-                    sport,
-                    tag: conn.tag,
-                });
-                return (events, send_queue);
-            }
-
-            if tcp_hdr.has_flag(TCP_ACK) && !tcp_hdr.has_flag(TCP_SYN) {
-                debug!("received ACK during CONNECTING on sport={sport}, connection may be established");
-                conn.state = ConnState::Connected;
-                conn.last_ack_time = Instant::now();
-                events.push(ConnectionEvent::Connected {
-                    device_id,
-                    sport,
-                    tag: conn.tag,
-                });
-                return (events, send_queue);
-            }
-        }
-
-        if conn.state == ConnState::Connected && !payload.is_empty() {
-            let peer_seq = tcp_hdr.seq();
-            if peer_seq == conn.rx_seq || conn.rx_recvd == 0 {
-                let data_len = payload.len() as u32;
-                debug!("handle_tcp: sport={sport} buffering {}B, peer_seq={} rx_seq={}",
-                    payload.len(), peer_seq, conn.rx_seq);
-                conn.ib_buf.extend_from_slice(payload);
-                conn.rx_seq = peer_seq.wrapping_add(data_len);
-                conn.rx_recvd = conn.rx_recvd.wrapping_add(data_len);
-                conn.update_ack();
-                conn.last_ack_time = Instant::now();
-                notify_handles.push(conn.data_notify.clone());
-
-                events.push(ConnectionEvent::DataReady {
-                    device_id,
-                    sport,
-                });
-            } else {
-                debug!(
-                    "out-of-order data on sport={sport}: expected seq={}, got seq={}",
-                    conn.rx_seq, peer_seq
-                );
-            }
-        }
-
-        if conn.state == ConnState::Connected && tcp_hdr.has_flag(TCP_ACK) {
-            let acked = tcp_hdr.ack();
-            if acked != conn.tx_acked {
-                let newly_acked = acked.wrapping_sub(conn.tx_acked);
-                conn.tx_acked = acked;
-                if newly_acked > 0 && !conn.ob_buf.is_empty() {
-                    let remove = std::cmp::min(newly_acked as usize, conn.ob_buf.len());
-                    conn.ob_buf.drain(..remove);
+        {
+            let mut devices = self.devices.write().await;
+            let device = match devices.get_mut(&device_id) {
+                Some(d) => d,
+                None => {
+                    warn!("tcp packet for unknown device_id={device_id}");
+                    return (vec![], vec![]);
                 }
-                debug!(
-                    "ack on sport={sport}: acked={acked} in_flight={}",
-                    conn.tx_seq.wrapping_sub(conn.tx_acked)
-                );
+            };
+
+            let conn = match device.connections.get_mut(&sport) {
+                Some(c) => c,
+                None => {
+                    warn!("tcp packet for sport={sport} but connection not found");
+                    return (vec![], vec![]);
+                }
+            };
+
+            if tcp_hdr.has_flag(TCP_RST) {
+                debug!("received RST on sport={sport}");
+                let reason = if !payload.is_empty() {
+                    String::from_utf8_lossy(payload).to_string()
+                } else {
+                    String::new()
+                };
+                if !reason.is_empty() {
+                    info!("RST reason: {reason}");
+                }
+                conn.state = ConnState::Dead;
+                events.push(ConnectionEvent::Disconnected {
+                    device_id,
+                    sport,
+                });
+                return (events, send_queue);
+            }
+
+            if conn.state == ConnState::Connecting {
+                if tcp_hdr.has_flag(TCP_SYN) && tcp_hdr.has_flag(TCP_ACK) {
+                    debug!("received SYN|ACK on sport={sport}, sending ACK");
+                    let peer_seq = tcp_hdr.seq();
+                    let our_ack = peer_seq.wrapping_add(1);
+                    let our_seq = conn.tx_seq;
+
+                    conn.tx_seq = our_seq.wrapping_add(1);
+                    conn.tx_ack = our_ack;
+                    conn.rx_seq = peer_seq.wrapping_add(1);
+                    conn.rx_recvd = our_ack;
+                    conn.state = ConnState::Connected;
+                    conn.last_ack_time = Instant::now();
+
+                    let ack_pkt = build_tcp_packet(
+                        device.version,
+                        device.tx_seq,
+                        device.rx_seq,
+                        sport,
+                        dport,
+                        our_seq,
+                        our_ack,
+                        TCP_ACK,
+                        (INITIAL_WINDOW >> 8) as u16,
+                        None,
+                    );
+                    send_queue.push(ack_pkt);
+                    device.tx_seq = device.tx_seq.wrapping_add(1);
+
+                    events.push(ConnectionEvent::Connected {
+                        device_id,
+                        sport,
+                        tag: conn.tag,
+                    });
+                    return (events, send_queue);
+                }
+
+                if tcp_hdr.has_flag(TCP_ACK) && !tcp_hdr.has_flag(TCP_SYN) {
+                    debug!("received ACK during CONNECTING on sport={sport}, connection may be established");
+                    conn.state = ConnState::Connected;
+                    conn.last_ack_time = Instant::now();
+                    events.push(ConnectionEvent::Connected {
+                        device_id,
+                        sport,
+                        tag: conn.tag,
+                    });
+                    return (events, send_queue);
+                }
+            }
+
+            if conn.state == ConnState::Connected && !payload.is_empty() {
+                let peer_seq = tcp_hdr.seq();
+                if peer_seq == conn.rx_seq || conn.rx_recvd == 0 {
+                    let data_len = payload.len() as u32;
+                    debug!("handle_tcp: sport={sport} buffering {}B, peer_seq={} rx_seq={}",
+                        payload.len(), peer_seq, conn.rx_seq);
+                    conn.ib_buf.extend_from_slice(payload);
+                    conn.rx_seq = peer_seq.wrapping_add(data_len);
+                    conn.rx_recvd = conn.rx_recvd.wrapping_add(data_len);
+                    conn.update_ack();
+                    conn.last_ack_time = Instant::now();
+                    notify_handles.push(conn.data_notify.clone());
+
+                    events.push(ConnectionEvent::DataReady {
+                        device_id,
+                        sport,
+                    });
+                } else {
+                    debug!(
+                        "out-of-order data on sport={sport}: expected seq={}, got seq={}",
+                        conn.rx_seq, peer_seq
+                    );
+                }
+            }
+
+            if conn.state == ConnState::Connected && tcp_hdr.has_flag(TCP_ACK) {
+                let acked = tcp_hdr.ack();
+                if acked != conn.tx_acked {
+                    let newly_acked = acked.wrapping_sub(conn.tx_acked);
+                    conn.tx_acked = acked;
+                    if newly_acked > 0 && !conn.ob_buf.is_empty() {
+                        let remove = std::cmp::min(newly_acked as usize, conn.ob_buf.len());
+                        conn.ob_buf.drain(..remove);
+                    }
+                    debug!(
+                        "ack on sport={sport}: acked={acked} in_flight={}",
+                        conn.tx_seq.wrapping_sub(conn.tx_acked)
+                    );
+                }
             }
         }
 
+        // Phase 3: Notify outside the lock
         for notify in &notify_handles {
             notify.notify_one();
         }
@@ -874,24 +890,36 @@ impl ConnectionManager {
         &self,
         device_id: u32,
         sport: u16,
-    ) -> Option<ConnectionEvent> {
+    ) -> (Option<ConnectionEvent>, Vec<Vec<u8>>) {
         let mut devices = self.devices.write().await;
-        let device = devices.get_mut(&device_id)?;
+        let device = match devices.get_mut(&device_id) {
+            Some(d) => d,
+            None => {
+                warn!("process_connection: device {device_id} not found");
+                return (None, vec![]);
+            }
+        };
 
-        let conn = device.connections.get_mut(&sport)?;
+        let conn = match device.connections.get_mut(&sport) {
+            Some(c) => c,
+            None => {
+                warn!("process_connection: sport={sport} not found on device {device_id}");
+                return (None, vec![]);
+            }
+        };
 
         if conn.state == ConnState::Dead {
-            return Some(ConnectionEvent::Disconnected { device_id, sport });
+            return (Some(ConnectionEvent::Disconnected { device_id, sport }), vec![]);
         }
 
         if conn.state == ConnState::Refused {
             let tag = conn.tag;
             device.connections.remove(&sport);
-            return Some(ConnectionEvent::Refused {
+            return (Some(ConnectionEvent::Refused {
                 device_id,
                 sport,
                 tag,
-            });
+            }), vec![]);
         }
 
         if conn.state == ConnState::Connecting && conn.needs_ack() {
@@ -909,8 +937,7 @@ impl ConnectionManager {
             );
             device.tx_seq = device.tx_seq.wrapping_add(1);
             debug!("sending SYN for sport={sport}");
-            let _ = pkt;
-            return None;
+            return (None, vec![pkt]);
         }
 
         if conn.state == ConnState::Connected && conn.is_sendable() {
@@ -921,7 +948,7 @@ impl ConnectionManager {
                 let tcp_ack = conn.tx_ack;
                 let win = (INITIAL_WINDOW >> 8) as u16;
 
-                let _pkt = build_tcp_packet(
+                let pkt = build_tcp_packet(
                     device.version,
                     device.tx_seq,
                     device.rx_seq,
@@ -941,7 +968,7 @@ impl ConnectionManager {
                     "sending {} bytes on sport={sport}: seq={tcp_seq}",
                     sendable
                 );
-                return None;
+                return (None, vec![pkt]);
             }
         }
 
@@ -962,11 +989,10 @@ impl ConnectionManager {
             conn.update_ack();
             conn.last_ack_time = Instant::now();
             debug!("sending ACK for sport={sport}");
-            let _ = pkt;
-            return None;
+            return (None, vec![pkt]);
         }
 
-        None
+        (None, vec![])
     }
 }
 

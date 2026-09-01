@@ -8,7 +8,7 @@ pub mod usb;
 use std::sync::{Arc, RwLock};
 use tokio::net::UnixListener;
 use tokio::sync::broadcast;
-use tracing::{info, error};
+use tracing::{info, warn, error};
 
 use device_scanner::{DeviceScanner, DeviceChange};
 use device_manager::DeviceManager;
@@ -21,7 +21,6 @@ pub async fn run_daemon() -> Result<(), Box<dyn std::error::Error>> {
     let listener = UnixListener::bind(SOCKET_PATH)?;
     info!("usbmuxd daemon listening on {SOCKET_PATH}");
 
-    // Set permissions so non-root clients can connect
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -29,18 +28,21 @@ pub async fn run_daemon() -> Result<(), Box<dyn std::error::Error>> {
         let _ = std::fs::set_permissions(SOCKET_PATH, perms);
     }
 
-    // SAFETY: set early before threads
     unsafe { std::env::set_var("USBMUXD_SOCKET_ADDRESS", SOCKET_PATH); }
 
     let scanner = Arc::new(RwLock::new(DeviceScanner::new()));
     let (event_tx, _) = broadcast::channel::<DeviceChange>(256);
     let device_manager = Arc::new(DeviceManager::new());
 
-    // Initial scan — drop lock before any .await
     {
         let changes = {
-            let mut s = scanner.write().unwrap();
-            s.scan()
+            match scanner.write() {
+                Ok(mut s) => s.scan(),
+                Err(e) => {
+                    error!("failed to acquire scanner lock for initial scan: {e}");
+                    Vec::new()
+                }
+            }
         };
         for change in &changes {
             match change {
@@ -56,7 +58,6 @@ pub async fn run_daemon() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // Background scanner task
     let scanner_clone = scanner.clone();
     let event_tx_clone = event_tx.clone();
     let device_manager_clone = device_manager.clone();
@@ -65,8 +66,13 @@ pub async fn run_daemon() -> Result<(), Box<dyn std::error::Error>> {
         loop {
             interval.tick().await;
             let changes = {
-                let mut s = scanner_clone.write().unwrap();
-                s.scan()
+                match scanner_clone.write() {
+                    Ok(mut s) => s.scan(),
+                    Err(e) => {
+                        warn!("scanner lock poisoned, skipping scan: {e}");
+                        Vec::new()
+                    }
+                }
             };
             for change in &changes {
                 match change {
@@ -82,20 +88,38 @@ pub async fn run_daemon() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+
     info!("waiting for connections...");
     loop {
-        match listener.accept().await {
-            Ok((stream, _)) => {
-                let scanner = scanner.clone();
-                let event_tx = event_tx.clone();
-                let device_manager = device_manager.clone();
-                tokio::spawn(async move {
-                    connection::handle_client(stream, scanner, event_tx, device_manager).await;
-                });
+        tokio::select! {
+            result = listener.accept() => {
+                match result {
+                    Ok((stream, _)) => {
+                        let scanner = scanner.clone();
+                        let event_tx = event_tx.clone();
+                        let device_manager = device_manager.clone();
+                        tokio::spawn(async move {
+                            connection::handle_client(stream, scanner, event_tx, device_manager).await;
+                        });
+                    }
+                    Err(e) => {
+                        error!("failed to accept connection: {e}");
+                    }
+                }
             }
-            Err(e) => {
-                error!("failed to accept connection: {e}");
+            _ = tokio::signal::ctrl_c() => {
+                info!("received SIGINT, shutting down");
+                break;
+            }
+            _ = sigterm.recv() => {
+                info!("received SIGTERM, shutting down");
+                break;
             }
         }
     }
+
+    let _ = std::fs::remove_file(SOCKET_PATH);
+    info!("daemon shut down cleanly");
+    Ok(())
 }

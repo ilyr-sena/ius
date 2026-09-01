@@ -173,6 +173,12 @@ async fn read_plist_packet(stream: &mut UnixStream) -> Result<plist::Dictionary,
     stream.read_exact(&mut header).await?;
 
     let size = u32::from_le_bytes(header[0..4].try_into().unwrap());
+    if size < 16 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("packet size too small: {size} bytes"),
+        ));
+    }
     let body_size = (size - 16) as usize;
     let mut body = vec![0u8; body_size];
     stream.read_exact(&mut body).await?;

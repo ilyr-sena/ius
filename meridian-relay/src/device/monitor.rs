@@ -18,16 +18,22 @@ pub async fn get_devices_snapshot() -> Result<Vec<Device>, std::io::Error> {
 }
 
 pub async fn watch_devices(mut on_event: impl FnMut(DeviceEvent)) {
+    let mut backoff_ms: u64 = 500;
+    let max_backoff_ms: u64 = 30_000;
+
     loop {
         match run_watch_loop(&mut on_event).await {
             Ok(()) => {
-                info!("listen stream ended, reconnecting in 2s");
+                info!("listen stream ended, reconnecting in {backoff_ms}ms");
+                backoff_ms = std::cmp::min(backoff_ms.saturating_mul(2), max_backoff_ms);
             }
             Err(e) => {
-                error!("watch error: {e}, reconnecting in 2s");
+                error!("watch error: {e}, reconnecting in {backoff_ms}ms");
+                backoff_ms = std::cmp::min(backoff_ms.saturating_mul(2), max_backoff_ms);
             }
         }
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+        backoff_ms = 500;
     }
 }
 

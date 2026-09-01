@@ -7,14 +7,21 @@ use super::Device;
 pub async fn enrich_device_info(device: &mut Device) {
     let udid = device.udid.trim().trim_end_matches('\0').to_string();
 
-    let output = match Command::new("ideviceinfo")
-        .args(["-u", &udid])
-        .output()
-        .await
+    let output = match tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        Command::new("ideviceinfo")
+            .args(["-u", &udid])
+            .output(),
+    )
+    .await
     {
-        Ok(o) => o,
-        Err(e) => {
-            warn!("ideviceinfo not found or failed for {udid}: {e}");
+        Ok(Ok(o)) => o,
+        Ok(Err(e)) => {
+            warn!("ideviceinfo failed for {udid}: {e}");
+            return;
+        }
+        Err(_) => {
+            warn!("ideviceinfo timed out for {udid}");
             return;
         }
     };
@@ -48,14 +55,21 @@ pub async fn enrich_all(devices: &mut [Device]) {
         .map(|dev| {
             let udid = dev.udid.trim().trim_end_matches('\0').to_string();
             async move {
-                let output = match Command::new("ideviceinfo")
-                    .args(["-u", &udid])
-                    .output()
-                    .await
+                let output = match tokio::time::timeout(
+                    std::time::Duration::from_secs(10),
+                    Command::new("ideviceinfo")
+                        .args(["-u", &udid])
+                        .output(),
+                )
+                .await
                 {
-                    Ok(o) => o,
-                    Err(e) => {
+                    Ok(Ok(o)) => o,
+                    Ok(Err(e)) => {
                         warn!("ideviceinfo failed for {udid}: {e}");
+                        return (udid, None);
+                    }
+                    Err(_) => {
+                        warn!("ideviceinfo timed out for {udid}");
                         return (udid, None);
                     }
                 };
