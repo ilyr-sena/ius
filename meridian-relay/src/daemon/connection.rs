@@ -237,17 +237,44 @@ async fn proxy_connection(
     device_id: u32,
     sport: u16,
     data_tx: mpsc::Sender<(u16, Vec<u8>)>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), String> {
     let notify = conn_mgr.get_data_notify(device_id, sport).await
-        .ok_or("connection not found")?;
+        .ok_or("connection not found".to_string())?;
 
     let mut client_buf = [0u8; 65536];
 
+    let result = proxy_loop(stream, conn_mgr, device_id, sport, &data_tx, &notify, &mut client_buf).await;
+
+    debug!("proxy: client disconnected on sport={sport}, cleaning up connection");
+
+    {
+        let mut devices = conn_mgr.devices.write().await;
+        if let Some(device) = devices.get_mut(&device_id) {
+            device.connections.remove(&sport);
+            debug!("proxy: removed connection sport={sport}");
+        }
+    }
+
+    result
+}
+
+async fn proxy_loop(
+    stream: &mut UnixStream,
+    conn_mgr: &ConnectionManager,
+    device_id: u32,
+    sport: u16,
+    data_tx: &mpsc::Sender<(u16, Vec<u8>)>,
+    notify: &Arc<tokio::sync::Notify>,
+    client_buf: &mut [u8; 65536],
+) -> Result<(), String> {
     loop {
         let data_to_client = {
             let devices = conn_mgr.devices.read().await;
             if let Some(device) = devices.get(&device_id) {
                 if let Some(conn) = device.connections.get(&sport) {
+                    if conn.state == ConnState::Dead {
+                        return Ok(());
+                    }
                     if conn.state != ConnState::Connected {
                         return Err("connection not connected".into());
                     }
@@ -265,8 +292,8 @@ async fn proxy_connection(
         };
 
         if let Some(data) = data_to_client {
-            stream.write_all(&data).await?;
-            debug!("proxy: wrote {} bytes to client", data.len());
+            debug!("proxy: writing {} bytes to client from device {} sport={}", data.len(), device_id, sport);
+            stream.write_all(&data).await.map_err(|e| e.to_string())?;
             let mut devices = conn_mgr.devices.write().await;
             if let Some(device) = devices.get_mut(&device_id) {
                 if let Some(conn) = device.connections.get_mut(&sport) {
@@ -276,19 +303,21 @@ async fn proxy_connection(
             continue;
         }
 
+        let notified = notify.notified();
+        tokio::pin!(notified);
+
         tokio::select! {
-            _ = notify.notified() => {}
-            result = stream.read(&mut client_buf) => {
+            _ = notified => {}
+            result = stream.read(client_buf) => {
                 match result {
                     Ok(0) => return Ok(()),
                     Ok(n) => {
                         let data = client_buf[..n].to_vec();
-                        info!("proxy: client sent {} bytes to device {} sport={}", data.len(), device_id, sport);
                         if let Err(e) = data_tx.send((sport, data)).await {
                             return Err(format!("data channel send failed: {e}").into());
                         }
                     }
-                    Err(e) => return Err(e.into()),
+                    Err(e) => return Err(e.to_string()),
                 }
             }
         }
@@ -298,29 +327,34 @@ async fn proxy_connection(
 }
 
 async fn read_system_pair_record(udid: &str) -> Result<Vec<u8>, std::io::Error> {
-    let socket_path = std::path::Path::new("/var/run/usbmuxd");
-    if !socket_path.exists() {
+    let lockdown_dir = std::path::Path::new("/var/lib/lockdown");
+    if !lockdown_dir.exists() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::NotFound,
-            "system usbmuxd not available",
+            "lockdown directory not found",
         ));
     }
 
-    let mut stream = tokio::net::UnixStream::connect(socket_path).await?;
-
-    let mut req = plist::Dictionary::new();
-    req.insert("MessageType".into(), "ReadPairRecord".into());
-    req.insert("PairRecordID".into(), udid.into());
-
-    let packet = RawPacket::new(req, protocol::XML_PLIST_VERSION, protocol::PLIST_MESSAGE_TYPE, 0);
-    packet.write_to(&mut stream).await?;
-
-    let response = protocol::read_packet(&mut stream).await?;
-    match response.plist.get("PairRecordData") {
-        Some(plist::Value::Data(d)) => Ok(d.clone()),
-        _ => Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "no PairRecordData in response",
-        )),
+    let plist_path = lockdown_dir.join(format!("{udid}.plist"));
+    if plist_path.exists() {
+        return tokio::fs::read(&plist_path).await;
     }
+
+    for entry in std::fs::read_dir(lockdown_dir).map_err(|e| {
+        std::io::Error::new(e.kind(), format!("failed to read lockdown dir: {e}"))
+    })? {
+        let entry = entry.map_err(|e| {
+            std::io::Error::new(e.kind(), format!("failed to read lockdown entry: {e}"))
+        })?;
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if name_str.ends_with(".plist") && name_str.contains(udid) {
+            return tokio::fs::read(entry.path()).await;
+        }
+    }
+
+    Err(std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        format!("pair record not found for {udid}"),
+    ))
 }

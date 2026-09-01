@@ -811,6 +811,8 @@ impl ConnectionManager {
             let peer_seq = tcp_hdr.seq();
             if peer_seq == conn.rx_seq || conn.rx_recvd == 0 {
                 let data_len = payload.len() as u32;
+                debug!("handle_tcp: sport={sport} buffering {}B, peer_seq={} rx_seq={}",
+                    payload.len(), peer_seq, conn.rx_seq);
                 conn.ib_buf.extend_from_slice(payload);
                 conn.rx_seq = peer_seq.wrapping_add(data_len);
                 conn.rx_recvd = conn.rx_recvd.wrapping_add(data_len);
@@ -846,7 +848,7 @@ impl ConnectionManager {
             }
         }
 
-        for notify in notify_handles {
+        for notify in &notify_handles {
             notify.notify_one();
         }
 
