@@ -6,8 +6,11 @@ use tracing::{debug, info, warn};
 
 use super::device_scanner::{DeviceScanner, DeviceChange};
 use super::device_manager::DeviceManager;
-use super::mux::{self, ConnState, ConnectionManager};
+use super::mux::{ConnState, ConnectionManager};
 use super::protocol::{self, RawPacket};
+
+const LOCKDOWN_DIR: &str = "/var/lib/lockdown";
+const LOCKDOWN_PORT: u16 = 62078;
 
 pub async fn handle_client(
     mut stream: UnixStream,
@@ -115,7 +118,24 @@ pub async fn handle_client(
 
                 info!("Connect request: device_id={device_id} port={port}");
 
-                // Connect through the device manager
+                if port == LOCKDOWN_PORT {
+                    let udid: Option<String> = {
+                        let s = scanner.read().unwrap();
+                        s.get_device_by_id(device_id).map(|d| d.udid.clone())
+                    };
+                    if let Some(ref udid) = udid {
+                        if !has_pair_record(udid) {
+                            warn!("Connect to lockdown port {LOCKDOWN_PORT} rejected: no pair record for {udid}");
+                            let resp = protocol::make_result_response(packet.tag, 8);
+                            if let Err(e) = resp.write_to(&mut stream).await {
+                                warn!("failed to write connect error: {e}");
+                                return;
+                            }
+                            continue;
+                        }
+                    }
+                }
+
                 match device_manager.connect(device_id, port, packet.tag).await {
                     Ok(sport) => {
                         info!("connection established: device_id={device_id} sport={sport}");
@@ -139,6 +159,8 @@ pub async fn handle_client(
                             }
                         };
 
+                        device_manager.increment_refcount(device_id).await;
+
                         if let Err(e) = proxy_connection(
                             &mut stream,
                             &device_manager.conn_mgr,
@@ -148,6 +170,8 @@ pub async fn handle_client(
                         ).await {
                             debug!("proxy ended: {e}");
                         }
+
+                        device_manager.decrement_refcount(device_id).await;
                         return;
                     }
                     Err(e) => {
@@ -162,8 +186,9 @@ pub async fn handle_client(
             }
 
             "ReadBUID" => {
+                let buid = get_or_create_buid();
                 let mut resp_plist = plist::Dictionary::new();
-                resp_plist.insert("BUID".into(), plist::Value::String("meridian-relay-buid".into()));
+                resp_plist.insert("BUID".into(), plist::Value::String(buid));
                 let resp = RawPacket::new(resp_plist, protocol::XML_PLIST_VERSION, protocol::PLIST_MESSAGE_TYPE, packet.tag);
                 if let Err(e) = resp.write_to(&mut stream).await {
                     warn!("failed to write BUID: {e}");
@@ -182,8 +207,7 @@ pub async fn handle_client(
                     }
                 };
 
-                // Try to read the pairing record from the system usbmuxd socket
-                match read_system_pair_record(&pair_record_id).await {
+                match read_pair_record(&pair_record_id) {
                     Ok(data) => {
                         let mut resp_plist = plist::Dictionary::new();
                         resp_plist.insert("PairRecordData".into(), plist::Value::Data(data));
@@ -202,20 +226,68 @@ pub async fn handle_client(
             }
 
             "SavePairRecord" => {
-                debug!("SavePairRecord (stub)");
-                let resp = protocol::make_result_response(packet.tag, 0);
-                if let Err(e) = resp.write_to(&mut stream).await {
-                    warn!("failed to write response: {e}");
-                    return;
+                let pair_record_id = match packet.plist.get("PairRecordID") {
+                    Some(plist::Value::String(s)) => s.clone(),
+                    _ => {
+                        warn!("SavePairRecord without PairRecordID");
+                        let resp = protocol::make_result_response(packet.tag, 1);
+                        let _ = resp.write_to(&mut stream).await;
+                        continue;
+                    }
+                };
+
+                let pair_data = match packet.plist.get("PairRecordData") {
+                    Some(plist::Value::Data(d)) => d.clone(),
+                    _ => {
+                        warn!("SavePairRecord without PairRecordData");
+                        let resp = protocol::make_result_response(packet.tag, 1);
+                        let _ = resp.write_to(&mut stream).await;
+                        continue;
+                    }
+                };
+
+                match save_pair_record(&pair_record_id, &pair_data) {
+                    Ok(()) => {
+                        info!("pair record saved for {pair_record_id}");
+                        let resp = protocol::make_result_response(packet.tag, 0);
+                        if let Err(e) = resp.write_to(&mut stream).await {
+                            warn!("failed to write save response: {e}");
+                            return;
+                        }
+                    }
+                    Err(e) => {
+                        warn!("failed to save pair record for {pair_record_id}: {e}");
+                        let resp = protocol::make_result_response(packet.tag, 1);
+                        let _ = resp.write_to(&mut stream).await;
+                    }
                 }
             }
 
             "DeletePairRecord" => {
-                debug!("DeletePairRecord (stub)");
-                let resp = protocol::make_result_response(packet.tag, 0);
-                if let Err(e) = resp.write_to(&mut stream).await {
-                    warn!("failed to write response: {e}");
-                    return;
+                let pair_record_id = match packet.plist.get("PairRecordID") {
+                    Some(plist::Value::String(s)) => s.clone(),
+                    _ => {
+                        warn!("DeletePairRecord without PairRecordID");
+                        let resp = protocol::make_result_response(packet.tag, 1);
+                        let _ = resp.write_to(&mut stream).await;
+                        continue;
+                    }
+                };
+
+                match delete_pair_record(&pair_record_id) {
+                    Ok(()) => {
+                        info!("pair record deleted for {pair_record_id}");
+                        let resp = protocol::make_result_response(packet.tag, 0);
+                        if let Err(e) = resp.write_to(&mut stream).await {
+                            warn!("failed to write delete response: {e}");
+                            return;
+                        }
+                    }
+                    Err(e) => {
+                        warn!("failed to delete pair record for {pair_record_id}: {e}");
+                        let resp = protocol::make_result_response(packet.tag, 1);
+                        let _ = resp.write_to(&mut stream).await;
+                    }
                 }
             }
 
@@ -229,6 +301,172 @@ pub async fn handle_client(
             }
         }
     }
+}
+
+fn has_pair_record(udid: &str) -> bool {
+    let lockdown_dir = std::path::Path::new(LOCKDOWN_DIR);
+    if !lockdown_dir.exists() {
+        return false;
+    }
+
+    let raw = udid.trim().trim_end_matches('\0');
+    let dashed = if raw.len() == 24 && !raw.contains('-') {
+        format!("{}-{}", &raw[..8], &raw[8..])
+    } else {
+        raw.to_string()
+    };
+
+    let plist_path = lockdown_dir.join(format!("{raw}.plist"));
+    if plist_path.exists() {
+        return true;
+    }
+    let plist_path = lockdown_dir.join(format!("{dashed}.plist"));
+    if plist_path.exists() {
+        return true;
+    }
+
+    if let Ok(entries) = std::fs::read_dir(lockdown_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if name_str.ends_with(".plist")
+                && (name_str.contains(raw) || name_str.contains(&dashed))
+            {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+fn read_pair_record(udid: &str) -> Result<Vec<u8>, std::io::Error> {
+    let lockdown_dir = std::path::Path::new(LOCKDOWN_DIR);
+    if !lockdown_dir.exists() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "lockdown directory not found",
+        ));
+    }
+
+    let raw = udid.trim().trim_end_matches('\0');
+    let dashed = if raw.len() == 24 && !raw.contains('-') {
+        format!("{}-{}", &raw[..8], &raw[8..])
+    } else {
+        raw.to_string()
+    };
+
+    let plist_path = lockdown_dir.join(format!("{raw}.plist"));
+    if plist_path.exists() {
+        return std::fs::read(&plist_path);
+    }
+    let plist_path = lockdown_dir.join(format!("{dashed}.plist"));
+    if plist_path.exists() {
+        return std::fs::read(&plist_path);
+    }
+
+    for entry in std::fs::read_dir(lockdown_dir).map_err(|e| {
+        std::io::Error::new(e.kind(), format!("failed to read lockdown dir: {e}"))
+    })? {
+        let entry = entry.map_err(|e| {
+            std::io::Error::new(e.kind(), format!("failed to read lockdown entry: {e}"))
+        })?;
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if name_str.ends_with(".plist")
+            && (name_str.contains(raw) || name_str.contains(&dashed))
+        {
+            return std::fs::read(entry.path());
+        }
+    }
+
+    Err(std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        format!("pair record not found for {udid}"),
+    ))
+}
+
+fn save_pair_record(udid: &str, data: &[u8]) -> Result<(), std::io::Error> {
+    let lockdown_dir = std::path::Path::new(LOCKDOWN_DIR);
+    if !lockdown_dir.exists() {
+        std::fs::create_dir_all(lockdown_dir)?;
+    }
+
+    let plist_path = lockdown_dir.join(format!("{udid}.plist"));
+    std::fs::write(&plist_path, data)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(0o644);
+        std::fs::set_permissions(&plist_path, perms)?;
+    }
+
+    Ok(())
+}
+
+fn delete_pair_record(udid: &str) -> Result<(), std::io::Error> {
+    let lockdown_dir = std::path::Path::new(LOCKDOWN_DIR);
+    if !lockdown_dir.exists() {
+        return Ok(());
+    }
+
+    let plist_path = lockdown_dir.join(format!("{udid}.plist"));
+    if plist_path.exists() {
+        std::fs::remove_file(&plist_path)?;
+        return Ok(());
+    }
+
+    for entry in std::fs::read_dir(lockdown_dir).map_err(|e| {
+        std::io::Error::new(e.kind(), format!("failed to read lockdown dir: {e}"))
+    })? {
+        let entry = entry.map_err(|e| {
+            std::io::Error::new(e.kind(), format!("failed to read lockdown entry: {e}"))
+        })?;
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if name_str.ends_with(".plist") && name_str.contains(udid) {
+            std::fs::remove_file(entry.path())?;
+            return Ok(());
+        }
+    }
+
+    Ok(())
+}
+
+fn get_or_create_buid() -> String {
+    let buid_path = std::path::Path::new(LOCKDOWN_DIR).join("buid");
+    if let Ok(buid) = std::fs::read_to_string(&buid_path) {
+        let trimmed = buid.trim().to_string();
+        if !trimmed.is_empty() {
+            return trimmed;
+        }
+    }
+
+    let buid = format!("{:016x}{:016x}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64,
+        rand_u64(),
+    );
+
+    let lockdown_dir = std::path::Path::new(LOCKDOWN_DIR);
+    if !lockdown_dir.exists() {
+        let _ = std::fs::create_dir_all(lockdown_dir);
+    }
+    let _ = std::fs::write(&buid_path, &buid);
+
+    buid
+}
+
+fn rand_u64() -> u64 {
+    use std::collections::hash_map::RandomState;
+    use std::hash::{BuildHasher, Hasher};
+    let s = RandomState::new();
+    let mut h = s.build_hasher();
+    h.write_u64(0xDEADBEEF);
+    h.finish()
 }
 
 async fn proxy_connection(
@@ -292,7 +530,6 @@ async fn proxy_loop(
         };
 
         if let Some(data) = data_to_client {
-            debug!("proxy: writing {} bytes to client from device {} sport={}", data.len(), device_id, sport);
             stream.write_all(&data).await.map_err(|e| e.to_string())?;
             let mut devices = conn_mgr.devices.write().await;
             if let Some(device) = devices.get_mut(&device_id) {
@@ -324,37 +561,4 @@ async fn proxy_loop(
 
         tokio::task::yield_now().await;
     }
-}
-
-async fn read_system_pair_record(udid: &str) -> Result<Vec<u8>, std::io::Error> {
-    let lockdown_dir = std::path::Path::new("/var/lib/lockdown");
-    if !lockdown_dir.exists() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "lockdown directory not found",
-        ));
-    }
-
-    let plist_path = lockdown_dir.join(format!("{udid}.plist"));
-    if plist_path.exists() {
-        return tokio::fs::read(&plist_path).await;
-    }
-
-    for entry in std::fs::read_dir(lockdown_dir).map_err(|e| {
-        std::io::Error::new(e.kind(), format!("failed to read lockdown dir: {e}"))
-    })? {
-        let entry = entry.map_err(|e| {
-            std::io::Error::new(e.kind(), format!("failed to read lockdown entry: {e}"))
-        })?;
-        let name = entry.file_name();
-        let name_str = name.to_string_lossy();
-        if name_str.ends_with(".plist") && name_str.contains(udid) {
-            return tokio::fs::read(entry.path()).await;
-        }
-    }
-
-    Err(std::io::Error::new(
-        std::io::ErrorKind::NotFound,
-        format!("pair record not found for {udid}"),
-    ))
 }

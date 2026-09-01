@@ -32,12 +32,7 @@ pub struct Device {
 }
 
 impl Device {
-    pub fn from_usbmuxd(dev: &idevice::usbmuxd::UsbmuxdDevice) -> Self {
-        let connection_type = match dev.connection_type {
-            idevice::usbmuxd::Connection::Usb => ConnectionType::Usb,
-            idevice::usbmuxd::Connection::Network(_) => ConnectionType::Network,
-            _ => ConnectionType::Usb,
-        };
+    pub fn from_usb_device(dev: &crate::daemon::device_scanner::UsbDevice) -> Self {
         Self {
             udid: format_device_udid(&dev.udid),
             device_id: dev.device_id,
@@ -45,18 +40,14 @@ impl Device {
             model: None,
             ios_version: None,
             build_version: None,
-            connection_type,
+            connection_type: ConnectionType::Usb,
         }
     }
 }
 
-/// Format USB serial number into Apple's standard UDID format.
-/// USB serial: "00008110000C694914F3801E"
-/// Apple UDID: "00008110-000C694914F3801E"
 fn format_device_udid(raw: &str) -> String {
     let trimmed = raw.trim().trim_end_matches('\0');
     if trimmed.len() == 24 && !trimmed.contains('-') {
-        // Insert dash after 8th character: AAAAAAAA-BBBBBBBB
         format!("{}-{}", &trimmed[..8], &trimmed[8..])
     } else {
         trimmed.to_string()
@@ -68,7 +59,6 @@ pub enum DeviceEvent {
     Connected(Device),
     Disconnected {
         udid: String,
-        #[allow(dead_code)]
         device_id: u32,
     },
 }

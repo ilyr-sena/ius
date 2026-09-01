@@ -120,18 +120,26 @@ impl AppleMuxInterface {
 
         let handle = device.open()?;
 
-        if handle
-            .kernel_driver_active(info.interface_number)
-            .unwrap_or(false)
-        {
-            debug!(
-                "detaching kernel driver on interface {}",
-                info.interface_number
-            );
-            handle.detach_kernel_driver(info.interface_number)?;
+        for iface_idx in 0..16 {
+            if handle.kernel_driver_active(iface_idx).unwrap_or(false) {
+                debug!("detaching kernel driver on interface {iface_idx}");
+                let _ = handle.detach_kernel_driver(iface_idx);
+            }
         }
 
-        handle.claim_interface(info.interface_number)?;
+        if let Err(e) = handle.set_active_configuration(info.config_number) {
+            debug!("set_active_configuration({}) failed: {e} (may already be active)", info.config_number);
+        }
+
+        match handle.claim_interface(info.interface_number) {
+            Ok(()) => {}
+            Err(rusb::Error::Busy) => {
+                warn!("interface {} busy (another process may hold the device), retrying after 200ms", info.interface_number);
+                std::thread::sleep(Duration::from_millis(200));
+                handle.claim_interface(info.interface_number)?;
+            }
+            Err(e) => return Err(e.into()),
+        }
 
         info!(
             "mux interface claimed: config={}, interface={}, ep_in=0x{:02X}, ep_out=0x{:02X}, max_packet={}",

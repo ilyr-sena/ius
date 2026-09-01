@@ -1,18 +1,17 @@
-use futures::StreamExt;
-use idevice::usbmuxd::UsbmuxdListenEvent;
 use tracing::{debug, error, info};
 
-use super::detect::{connect_usbmuxd, list_raw_devices};
+use super::detect::{UsbmuxdClient, ListenEvent};
 use super::info::enrich_all;
 use super::{Device, DeviceEvent};
 
-pub async fn get_devices_snapshot() -> Result<Vec<Device>, idevice::IdeviceError> {
-    let mut conn = connect_usbmuxd().await?;
-    let raws = list_raw_devices(&mut conn).await?;
+pub async fn get_devices_snapshot() -> Result<Vec<Device>, std::io::Error> {
+    let mut client = UsbmuxdClient::connect().await?;
+    let raws = client.send_list_devices().await?;
 
-    let mut devices: Vec<Device> = raws.iter().map(Device::from_usbmuxd).collect();
+    let mut devices: Vec<Device> = raws.iter().map(|r| {
+        Device::from_usb_device(&super::detect::raw_to_usb_device(r))
+    }).collect();
 
-    // Enrich all devices in parallel via ideviceinfo
     enrich_all(&mut devices).await;
 
     Ok(devices)
@@ -34,12 +33,13 @@ pub async fn watch_devices(mut on_event: impl FnMut(DeviceEvent)) {
 
 async fn run_watch_loop(
     on_event: &mut impl FnMut(DeviceEvent),
-) -> Result<(), idevice::IdeviceError> {
-    let mut conn = connect_usbmuxd().await?;
+) -> Result<(), std::io::Error> {
+    let mut client = UsbmuxdClient::connect().await?;
 
-    // snapshot existing devices
-    let raws = list_raw_devices(&mut conn).await?;
-    let mut devices: Vec<Device> = raws.iter().map(Device::from_usbmuxd).collect();
+    let raws = client.send_list_devices().await?;
+    let mut devices: Vec<Device> = raws.iter().map(|r| {
+        Device::from_usb_device(&super::detect::raw_to_usb_device(r))
+    }).collect();
     enrich_all(&mut devices).await;
 
     let mut known: std::collections::HashMap<u32, Device> = std::collections::HashMap::new();
@@ -50,18 +50,18 @@ async fn run_watch_loop(
 
     debug!("entering listen loop with {} known device(s)", known.len());
 
-    let mut stream = conn.listen().await?;
-    while let Some(item) = stream.next().await {
-        match item {
-            Ok(UsbmuxdListenEvent::Connected(raw)) => {
+    client.send_listen().await?;
+
+    loop {
+        match client.read_event().await {
+            Ok(ListenEvent::Attached(raw)) => {
                 info!("device connected: {}", raw.udid);
-                let mut dev = Device::from_usbmuxd(&raw);
-                // Enrich single device
+                let mut dev = Device::from_usb_device(&super::detect::raw_to_usb_device(&raw));
                 super::info::enrich_device_info(&mut dev).await;
                 on_event(DeviceEvent::Connected(dev.clone()));
                 known.insert(raw.device_id, dev);
             }
-            Ok(UsbmuxdListenEvent::Disconnected(device_id)) => {
+            Ok(ListenEvent::Detached(device_id)) => {
                 info!("device disconnected: mux_id={device_id}");
                 if let Some(dev) = known.remove(&device_id) {
                     on_event(DeviceEvent::Disconnected {

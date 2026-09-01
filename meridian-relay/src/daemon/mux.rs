@@ -271,7 +271,7 @@ pub fn parse_packet(data: &[u8]) -> Result<MuxPacket> {
     let protocol = u32::from_be_bytes(data[0..4].try_into().unwrap());
     let length = u32::from_be_bytes(data[4..8].try_into().unwrap()) as usize;
 
-    let (header_size, tx_seq, rx_seq) = if data.len() >= MUX_HEADER_V2_SIZE {
+    let (header_size, _tx_seq, _rx_seq) = if data.len() >= MUX_HEADER_V2_SIZE {
         let magic = u32::from_be_bytes(data[8..12].try_into().unwrap());
         if magic == MAGIC || magic == 0xFACEFACE {
             let tx = u16::from_be_bytes(data[12..14].try_into().unwrap());
@@ -402,6 +402,21 @@ pub fn build_rst_packet(proto_version: u8, tx_seq: u16, rx_seq: u16, sport: u16,
         0,
         None,
     )
+}
+
+pub fn build_control_packet(proto_version: u8, tx_seq: u16, rx_seq: u16, payload: &[u8]) -> Vec<u8> {
+    let header_size = MuxHeader::header_size(proto_version);
+    let total_length = header_size + payload.len();
+
+    let mux_hdr = if proto_version == 2 {
+        MuxHeader::v2(PROTO_CONTROL, total_length as u32, tx_seq, rx_seq)
+    } else {
+        MuxHeader::v1(PROTO_CONTROL, total_length as u32)
+    };
+
+    let mut buf = mux_hdr.to_bytes(proto_version);
+    buf.extend_from_slice(payload);
+    buf
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

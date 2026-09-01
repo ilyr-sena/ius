@@ -5,7 +5,7 @@ use tracing::{debug, info, warn};
 
 use super::mux::{
     ConnState, ConnectionManager, ConnectionEvent, DeviceState,
-    build_version_request, build_setup_packet, build_tcp_packet,
+    build_version_request, build_setup_packet, build_tcp_packet, build_control_packet,
     parse_packet, MuxPacket, TCP_SYN, TCP_ACK, INITIAL_WINDOW,
 };
 use super::usb::{AppleMuxInterface, UsbReader, PacketReassembler};
@@ -16,6 +16,7 @@ pub struct ManagedDevice {
     pub usb: Arc<AppleMuxInterface>,
     pub data_tx: mpsc::Sender<(u16, Vec<u8>)>,
     pub connect_tx: mpsc::Sender<ConnectRequest>,
+    pub refcount: u32,
 }
 
 pub struct ConnectRequest {
@@ -35,6 +36,22 @@ impl DeviceManager {
         Self {
             devices: Arc::new(RwLock::new(HashMap::new())),
             conn_mgr: ConnectionManager::new(),
+        }
+    }
+
+    pub async fn increment_refcount(&self, device_id: u32) {
+        let mut devices = self.devices.write().await;
+        if let Some(dev) = devices.get_mut(&device_id) {
+            dev.refcount += 1;
+            debug!("device {device_id} refcount incremented to {}", dev.refcount);
+        }
+    }
+
+    pub async fn decrement_refcount(&self, device_id: u32) {
+        let mut devices = self.devices.write().await;
+        if let Some(dev) = devices.get_mut(&device_id) {
+            dev.refcount = dev.refcount.saturating_sub(1);
+            debug!("device {device_id} refcount decremented to {}", dev.refcount);
         }
     }
 
@@ -80,7 +97,7 @@ impl DeviceManager {
         let usb = match AppleMuxInterface::open(&rusb_dev) {
             Ok(u) => Arc::new(u),
             Err(e) => {
-                warn!("failed to open mux interface for {}: {e}", dev.udid);
+                warn!("failed to open mux interface for {}: {e} (will retry next scan)", dev.udid);
                 return;
             }
         };
@@ -97,6 +114,7 @@ impl DeviceManager {
             usb: usb.clone(),
             data_tx,
             connect_tx,
+            refcount: 0,
         };
 
         devices.insert(dev.device_id, managed);
@@ -123,6 +141,8 @@ impl DeviceManager {
             let mut data_rx = data_rx;
             let mut connect_rx = connect_rx;
 
+            let mut disconnect_detected = false;
+
             loop {
                 tokio::select! {
                     result = usb_rx.recv() => {
@@ -139,7 +159,8 @@ impl DeviceManager {
                                 }
                             }
                             None => {
-                                debug!("USB read channel closed for device {device_id}");
+                                info!("USB read channel closed for device {device_id} — disconnect detected");
+                                disconnect_detected = true;
                                 break;
                             }
                         }
@@ -187,6 +208,10 @@ impl DeviceManager {
                 }
             }
 
+            if disconnect_detected {
+                Self::cleanup_device_connections(&conn_mgr, device_id).await;
+            }
+
             info!("device {device_id} processing task stopped");
         });
 
@@ -194,10 +219,26 @@ impl DeviceManager {
     }
 
     pub async fn remove_device(&self, device_id: u32) {
-        let mut devices = self.devices.write().await;
-        devices.remove(&device_id);
+        {
+            let mut devices = self.devices.write().await;
+            devices.remove(&device_id);
+        }
         self.conn_mgr.remove_device(device_id).await;
         info!("device {device_id} removed from manager");
+    }
+
+    async fn cleanup_device_connections(conn_mgr: &ConnectionManager, device_id: u32) {
+        let mut devices = conn_mgr.devices.write().await;
+        if let Some(device) = devices.get_mut(&device_id) {
+            let sport_keys: Vec<u16> = device.connections.keys().copied().collect();
+            for sport in &sport_keys {
+                if let Some(conn) = device.connections.get_mut(sport) {
+                    conn.state = ConnState::Dead;
+                    conn.data_notify.notify_one();
+                }
+            }
+            info!("cleaned up {} connections for device {device_id}", sport_keys.len());
+        }
     }
 
     async fn process_device_packet(
@@ -207,9 +248,6 @@ impl DeviceManager {
         data: &[u8],
         version_negotiated: &mut bool,
     ) {
-        if data.len() >= 16 {
-            debug!("raw mux data ({}B): {:02x?}", data.len(), &data[..data.len().min(64)]);
-        }
         let packet = match parse_packet(data) {
             Ok(p) => p,
             Err(e) => {
@@ -239,6 +277,17 @@ impl DeviceManager {
                     device.version = if major >= 2 { 2 } else { 1 };
                     device.state = DeviceState::Active;
                     device.tx_seq = 1;
+                }
+
+                let win_pkt = build_control_packet(
+                    if major >= 2 { 2 } else { 1 },
+                    0, 0xFFFF,
+                    &build_device_capabilities(),
+                );
+                if let Err(e) = usb.send(&win_pkt) {
+                    warn!("failed to send WIN for device {device_id}: {e}");
+                } else {
+                    debug!("sent WIN capabilities for device {device_id}");
                 }
             }
 
@@ -342,8 +391,6 @@ impl DeviceManager {
             return;
         }
 
-        info!("sent {} bytes TCP data on device {device_id} sport={sport}", data.len());
-
         let mut devices = conn_mgr.devices.write().await;
         if let Some(device) = devices.get_mut(&device_id) {
             device.tx_seq = device.tx_seq.wrapping_add(1);
@@ -396,8 +443,6 @@ impl DeviceManager {
             (INITIAL_WINDOW >> 8) as u16,
             None,
         );
-
-        debug!("SYN packet ({}B): {:02x?}", syn_pkt.len(), &syn_pkt[..syn_pkt.len().min(64)]);
 
         drop(devices);
 
@@ -464,6 +509,22 @@ impl DeviceManager {
 
         resp_rx.await.map_err(|e| format!("channel recv failed: {e}"))?
     }
+}
+
+fn build_device_capabilities() -> Vec<u8> {
+    let mut caps = plist::Dictionary::new();
+    caps.insert("AllowsSimulators".into(), plist::Value::Boolean(false));
+    caps.insert("SupportsLockdown".into(), plist::Value::Boolean(true));
+    caps.insert("SupportsPairing".into(), plist::Value::Boolean(true));
+    caps.insert("SupportsSSL".into(), plist::Value::Boolean(true));
+
+    let mut features = plist::Dictionary::new();
+    features.insert("com.apple.mobiledevice_proxy".into(), plist::Value::Integer(0.into()));
+    caps.insert("FeatureSet".into(), plist::Value::Dictionary(features));
+
+    let mut buf = Vec::new();
+    plist::to_writer_xml(&mut buf, &plist::Value::Dictionary(caps)).unwrap_or_default();
+    buf
 }
 
 impl Default for DeviceManager {

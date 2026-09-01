@@ -1,11 +1,10 @@
-mod device;
-
 use clap::{Parser, Subcommand};
 use tracing::{info, warn, error};
 use tracing_subscriber::EnvFilter;
 
-use device::detect::ensure_daemon_socket_env;
-use device::monitor::{get_devices_snapshot, watch_devices};
+use meridian_relay::device::detect::ensure_daemon_socket_env;
+use meridian_relay::device::monitor::{get_devices_snapshot, watch_devices};
+use meridian_relay::device::Device;
 
 #[derive(Parser)]
 #[command(name = "meridian-relay", version, about = "USB device management daemon")]
@@ -164,7 +163,7 @@ async fn start_daemon_if_needed() {
     warn!("daemon socket not found after 5s, proceeding anyway");
 }
 
-fn print_device(dev: &device::Device) {
+fn print_device(dev: &Device) {
     let name = dev.name.as_deref().unwrap_or("Unknown");
     let model = dev.model.as_deref().unwrap_or("?");
     let ios = dev.ios_version.as_deref().unwrap_or("?");
