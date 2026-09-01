@@ -4,6 +4,8 @@ use tokio::net::UnixStream;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
+use tokio::fs as tokio_fs;
+
 use super::device_scanner::{DeviceScanner, DeviceChange};
 use super::device_manager::DeviceManager;
 use super::mux::{ConnState, ConnectionManager};
@@ -153,7 +155,7 @@ pub async fn handle_client(
                         }
                     };
                     if let Some(ref udid) = udid {
-                        if !has_pair_record(udid) {
+                        if !has_pair_record(udid).await {
                             warn!("Connect to lockdown port {LOCKDOWN_PORT} rejected: no pair record for {udid}");
                             let resp = protocol::make_result_response(packet.tag, 8);
                             if let Err(e) = resp.write_to(&mut stream).await {
@@ -215,7 +217,7 @@ pub async fn handle_client(
             }
 
             "ReadBUID" => {
-                let buid = get_or_create_buid();
+                let buid = get_or_create_buid().await;
                 let mut resp_plist = plist::Dictionary::new();
                 resp_plist.insert("BUID".into(), plist::Value::String(buid));
                 let resp = RawPacket::new(resp_plist, protocol::XML_PLIST_VERSION, protocol::PLIST_MESSAGE_TYPE, packet.tag);
@@ -236,7 +238,7 @@ pub async fn handle_client(
                     }
                 };
 
-                match read_pair_record(&pair_record_id) {
+                match read_pair_record(&pair_record_id).await {
                     Ok(data) => {
                         let mut resp_plist = plist::Dictionary::new();
                         resp_plist.insert("PairRecordData".into(), plist::Value::Data(data));
@@ -275,7 +277,7 @@ pub async fn handle_client(
                     }
                 };
 
-                match save_pair_record(&pair_record_id, &pair_data) {
+                match save_pair_record(&pair_record_id, &pair_data).await {
                     Ok(()) => {
                         info!("pair record saved for {pair_record_id}");
                         let resp = protocol::make_result_response(packet.tag, 0);
@@ -303,7 +305,7 @@ pub async fn handle_client(
                     }
                 };
 
-                match delete_pair_record(&pair_record_id) {
+                match delete_pair_record(&pair_record_id).await {
                     Ok(()) => {
                         info!("pair record deleted for {pair_record_id}");
                         let resp = protocol::make_result_response(packet.tag, 0);
@@ -332,9 +334,9 @@ pub async fn handle_client(
     }
 }
 
-fn has_pair_record(udid: &str) -> bool {
+async fn has_pair_record(udid: &str) -> bool {
     let lockdown_dir = std::path::Path::new(LOCKDOWN_DIR);
-    if !lockdown_dir.exists() {
+    if !tokio_fs::metadata(lockdown_dir).await.is_ok() {
         return false;
     }
 
@@ -346,16 +348,16 @@ fn has_pair_record(udid: &str) -> bool {
     };
 
     let plist_path = lockdown_dir.join(format!("{raw}.plist"));
-    if plist_path.exists() {
+    if tokio_fs::metadata(&plist_path).await.is_ok() {
         return true;
     }
     let plist_path = lockdown_dir.join(format!("{dashed}.plist"));
-    if plist_path.exists() {
+    if tokio_fs::metadata(&plist_path).await.is_ok() {
         return true;
     }
 
-    if let Ok(entries) = std::fs::read_dir(lockdown_dir) {
-        for entry in entries.flatten() {
+    if let Ok(mut entries) = tokio_fs::read_dir(lockdown_dir).await {
+        while let Ok(Some(entry)) = entries.next_entry().await {
             let name = entry.file_name();
             let name_str = name.to_string_lossy();
             if name_str.ends_with(".plist")
@@ -369,9 +371,9 @@ fn has_pair_record(udid: &str) -> bool {
     false
 }
 
-fn read_pair_record(udid: &str) -> Result<Vec<u8>, std::io::Error> {
+async fn read_pair_record(udid: &str) -> Result<Vec<u8>, std::io::Error> {
     let lockdown_dir = std::path::Path::new(LOCKDOWN_DIR);
-    if !lockdown_dir.exists() {
+    if tokio_fs::metadata(lockdown_dir).await.is_err() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::NotFound,
             "lockdown directory not found",
@@ -386,26 +388,27 @@ fn read_pair_record(udid: &str) -> Result<Vec<u8>, std::io::Error> {
     };
 
     let plist_path = lockdown_dir.join(format!("{raw}.plist"));
-    if plist_path.exists() {
-        return std::fs::read(&plist_path);
+    if tokio_fs::metadata(&plist_path).await.is_ok() {
+        return tokio_fs::read(&plist_path).await;
     }
     let plist_path = lockdown_dir.join(format!("{dashed}.plist"));
-    if plist_path.exists() {
-        return std::fs::read(&plist_path);
+    if tokio_fs::metadata(&plist_path).await.is_ok() {
+        return tokio_fs::read(&plist_path).await;
     }
 
-    for entry in std::fs::read_dir(lockdown_dir).map_err(|e| {
+    let mut entries = tokio_fs::read_dir(lockdown_dir).await.map_err(|e| {
         std::io::Error::new(e.kind(), format!("failed to read lockdown dir: {e}"))
+    })?;
+
+    while let Some(entry) = entries.next_entry().await.map_err(|e| {
+        std::io::Error::new(e.kind(), format!("failed to read lockdown entry: {e}"))
     })? {
-        let entry = entry.map_err(|e| {
-            std::io::Error::new(e.kind(), format!("failed to read lockdown entry: {e}"))
-        })?;
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
         if name_str.ends_with(".plist")
             && (name_str.contains(raw) || name_str.contains(&dashed))
         {
-            return std::fs::read(entry.path());
+            return tokio_fs::read(entry.path()).await;
         }
     }
 
@@ -415,47 +418,48 @@ fn read_pair_record(udid: &str) -> Result<Vec<u8>, std::io::Error> {
     ))
 }
 
-fn save_pair_record(udid: &str, data: &[u8]) -> Result<(), std::io::Error> {
+async fn save_pair_record(udid: &str, data: &[u8]) -> Result<(), std::io::Error> {
     let lockdown_dir = std::path::Path::new(LOCKDOWN_DIR);
-    if !lockdown_dir.exists() {
-        std::fs::create_dir_all(lockdown_dir)?;
+    if tokio_fs::metadata(lockdown_dir).await.is_err() {
+        tokio_fs::create_dir_all(lockdown_dir).await?;
     }
 
     let plist_path = lockdown_dir.join(format!("{udid}.plist"));
-    std::fs::write(&plist_path, data)?;
+    tokio_fs::write(&plist_path, data).await?;
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let perms = std::fs::Permissions::from_mode(0o600);
-        std::fs::set_permissions(&plist_path, perms)?;
+        tokio_fs::set_permissions(&plist_path, perms).await?;
     }
 
     Ok(())
 }
 
-fn delete_pair_record(udid: &str) -> Result<(), std::io::Error> {
+async fn delete_pair_record(udid: &str) -> Result<(), std::io::Error> {
     let lockdown_dir = std::path::Path::new(LOCKDOWN_DIR);
-    if !lockdown_dir.exists() {
+    if tokio_fs::metadata(lockdown_dir).await.is_err() {
         return Ok(());
     }
 
     let plist_path = lockdown_dir.join(format!("{udid}.plist"));
-    if plist_path.exists() {
-        std::fs::remove_file(&plist_path)?;
+    if tokio_fs::metadata(&plist_path).await.is_ok() {
+        tokio_fs::remove_file(&plist_path).await?;
         return Ok(());
     }
 
-    for entry in std::fs::read_dir(lockdown_dir).map_err(|e| {
+    let mut entries = tokio_fs::read_dir(lockdown_dir).await.map_err(|e| {
         std::io::Error::new(e.kind(), format!("failed to read lockdown dir: {e}"))
+    })?;
+
+    while let Some(entry) = entries.next_entry().await.map_err(|e| {
+        std::io::Error::new(e.kind(), format!("failed to read lockdown entry: {e}"))
     })? {
-        let entry = entry.map_err(|e| {
-            std::io::Error::new(e.kind(), format!("failed to read lockdown entry: {e}"))
-        })?;
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
         if name_str.ends_with(".plist") && name_str.contains(udid) {
-            std::fs::remove_file(entry.path())?;
+            tokio_fs::remove_file(entry.path()).await?;
             return Ok(());
         }
     }
@@ -463,9 +467,9 @@ fn delete_pair_record(udid: &str) -> Result<(), std::io::Error> {
     Ok(())
 }
 
-fn get_or_create_buid() -> String {
+async fn get_or_create_buid() -> String {
     let buid_path = std::path::Path::new(LOCKDOWN_DIR).join("buid");
-    if let Ok(buid) = std::fs::read_to_string(&buid_path) {
+    if let Ok(buid) = tokio_fs::read_to_string(&buid_path).await {
         let trimmed = buid.trim().to_string();
         if !trimmed.is_empty() {
             return trimmed;
@@ -477,23 +481,23 @@ fn get_or_create_buid() -> String {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos() as u64,
-        rand_u64(),
+        rand_u64().await,
     );
 
     let lockdown_dir = std::path::Path::new(LOCKDOWN_DIR);
-    if !lockdown_dir.exists() {
-        let _ = std::fs::create_dir_all(lockdown_dir);
+    if tokio_fs::metadata(lockdown_dir).await.is_err() {
+        let _ = tokio_fs::create_dir_all(lockdown_dir).await;
     }
-    let _ = std::fs::write(&buid_path, &buid);
+    let _ = tokio_fs::write(&buid_path, &buid).await;
 
     buid
 }
 
-fn rand_u64() -> u64 {
+async fn rand_u64() -> u64 {
     let mut buf = [0u8; 8];
-    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
-        use std::io::Read;
-        let _ = f.read_exact(&mut buf);
+    if let Ok(mut f) = tokio_fs::File::open("/dev/urandom").await {
+        use tokio::io::AsyncReadExt;
+        let _ = f.read_exact(&mut buf).await;
     } else {
         // Fallback: timestamp + address-based hash
         use std::hash::{BuildHasher, Hasher};
@@ -505,7 +509,6 @@ fn rand_u64() -> u64 {
                 .unwrap_or_default()
                 .as_nanos() as u64,
         );
-        // Use a stack address as entropy source
         let stack_addr = &h as *const _ as u64;
         h.write_u64(stack_addr);
         return h.finish();

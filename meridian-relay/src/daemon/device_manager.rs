@@ -56,18 +56,21 @@ impl DeviceManager {
     }
 
     pub async fn add_device(&self, dev: &UsbDevice) {
-        let mut devices = self.devices.write().await;
-        if devices.contains_key(&dev.device_id) {
-            debug!("device {} already managed", dev.device_id);
-            return;
+        {
+            let devices = self.devices.read().await;
+            if devices.contains_key(&dev.device_id) {
+                debug!("device {} already managed", dev.device_id);
+                return;
+            }
         }
 
-        let rusb_dev = {
+        let udid_for_block = dev.udid.clone();
+        let usb = match tokio::task::spawn_blocking(move || -> Result<Arc<AppleMuxInterface>, ()> {
             let all_devices = match rusb::devices() {
                 Ok(d) => d,
                 Err(e) => {
-                    warn!("failed to list USB devices for {}: {e}", dev.udid);
-                    return;
+                    warn!("failed to list USB devices for {udid_for_block}: {e}");
+                    return Err(());
                 }
             };
             let mut found = None;
@@ -76,7 +79,7 @@ impl DeviceManager {
                     if desc.vendor_id() == 0x05AC {
                         if let Ok(handle) = device.open() {
                             if let Ok(serial) = handle.read_serial_number_string_ascii(&desc) {
-                                if serial.trim().trim_end_matches('\0') == dev.udid {
+                                if serial.trim().trim_end_matches('\0') == udid_for_block {
                                     found = Some(device.clone());
                                     break;
                                 }
@@ -85,19 +88,24 @@ impl DeviceManager {
                     }
                 }
             }
-            match found {
+            let rusb_dev = match found {
                 Some(d) => d,
                 None => {
-                    warn!("failed to find USB device for {}: not found", dev.udid);
-                    return;
+                    warn!("failed to find USB device for {udid_for_block}: not found");
+                    return Err(());
+                }
+            };
+
+            match AppleMuxInterface::open(&rusb_dev) {
+                Ok(u) => Ok(Arc::new(u)),
+                Err(e) => {
+                    warn!("failed to open mux interface for {udid_for_block}: {e} (will retry next scan)");
+                    Err(())
                 }
             }
-        };
-
-        let usb = match AppleMuxInterface::open(&rusb_dev) {
-            Ok(u) => Arc::new(u),
-            Err(e) => {
-                warn!("failed to open mux interface for {}: {e} (will retry next scan)", dev.udid);
+        }).await {
+            Ok(Ok(u)) => u,
+            _ => {
                 return;
             }
         };
@@ -117,7 +125,10 @@ impl DeviceManager {
             refcount: 0,
         };
 
-        devices.insert(dev.device_id, managed);
+        {
+            let mut devices = self.devices.write().await;
+            devices.insert(dev.device_id, managed);
+        }
 
         self.conn_mgr.add_device(dev.device_id).await;
 

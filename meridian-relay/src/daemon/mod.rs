@@ -28,6 +28,10 @@ pub async fn run_daemon() -> Result<(), Box<dyn std::error::Error>> {
         let _ = std::fs::set_permissions(SOCKET_PATH, perms);
     }
 
+    // SAFETY: set_var is called once at daemon startup, before any threads
+    // read this environment variable. The tokio runtime hasn't spawned any
+    // threads that would read env vars yet at this point.
+    #[allow(unsafe_code)]
     unsafe { std::env::set_var("USBMUXD_SOCKET_ADDRESS", SOCKET_PATH); }
 
     let scanner = Arc::new(RwLock::new(DeviceScanner::new()));
@@ -35,15 +39,19 @@ pub async fn run_daemon() -> Result<(), Box<dyn std::error::Error>> {
     let device_manager = Arc::new(DeviceManager::new());
 
     {
-        let changes = {
-            match scanner.write() {
+        let scanner_clone = scanner.clone();
+        let changes = tokio::task::spawn_blocking(move || {
+            match scanner_clone.write() {
                 Ok(mut s) => s.scan(),
                 Err(e) => {
                     error!("failed to acquire scanner lock for initial scan: {e}");
                     Vec::new()
                 }
             }
-        };
+        }).await.unwrap_or_else(|e| {
+            error!("initial scan task panicked: {e}");
+            Vec::new()
+        });
         for change in &changes {
             match change {
                 DeviceChange::Attached(dev) => {
@@ -65,13 +73,20 @@ pub async fn run_daemon() -> Result<(), Box<dyn std::error::Error>> {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
         loop {
             interval.tick().await;
-            let changes = {
-                match scanner_clone.write() {
+            let scanner_for_blocking = scanner_clone.clone();
+            let changes = match tokio::task::spawn_blocking(move || {
+                match scanner_for_blocking.write() {
                     Ok(mut s) => s.scan(),
                     Err(e) => {
                         warn!("scanner lock poisoned, skipping scan: {e}");
                         Vec::new()
                     }
+                }
+            }).await {
+                Ok(c) => c,
+                Err(e) => {
+                    warn!("scanner task panicked: {e}");
+                    Vec::new()
                 }
             };
             for change in &changes {
