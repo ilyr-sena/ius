@@ -56,8 +56,15 @@ pub async fn read_packet(stream: &mut (impl AsyncReadExt + Unpin)) -> Result<Raw
     let mut body = vec![0u8; body_size];
     stream.read_exact(&mut body).await?;
 
-    let plist: plist::Dictionary = plist::from_bytes(&body)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    let plist: plist::Dictionary = if body.len() > 0 && body[0] == b'b' {
+        // Binary plist starts with 'b' - needs a cursor for seeking
+        let mut cursor = std::io::Cursor::new(&body);
+        plist::from_reader(&mut cursor)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("binary plist parse error: {e}")))?
+    } else {
+        plist::from_bytes(&body)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("xml plist parse error: {e}")))?
+    };
 
     debug!("read packet: size={size} version={version} message={message} tag={tag}");
 
@@ -78,25 +85,23 @@ pub fn make_result_response(tag: u32, number: u32) -> RawPacket {
 }
 
 pub fn make_device_list_response(tag: u32, devices: &[crate::daemon::device_scanner::UsbDevice]) -> RawPacket {
-    let device_list: Vec<plist::Value> = devices
-        .iter()
-        .map(|dev| {
-            let mut props = plist::Dictionary::new();
-            props.insert("ConnectionType".into(), plist::Value::String("USB".into()));
-            props.insert("SerialNumber".into(), plist::Value::String(dev.udid.clone()));
-            props.insert("ProductID".into(), plist::Value::Integer(dev.product_id.into()));
-            props.insert("LocationID".into(), plist::Value::Integer(0.into()));
-            props.insert("Port".into(), plist::Value::Integer(0.into()));
+    let mut device_dict = plist::Dictionary::new();
+    for dev in devices {
+        let mut props = plist::Dictionary::new();
+        props.insert("ConnectionType".into(), plist::Value::String("USB".into()));
+        props.insert("SerialNumber".into(), plist::Value::String(dev.udid.clone()));
+        props.insert("ProductID".into(), plist::Value::Integer(dev.product_id.into()));
+        props.insert("LocationID".into(), plist::Value::Integer(0.into()));
+        props.insert("Port".into(), plist::Value::Integer(0.into()));
 
-            let mut device_entry = plist::Dictionary::new();
-            device_entry.insert("DeviceID".into(), plist::Value::Integer(dev.device_id.into()));
-            device_entry.insert("Properties".into(), plist::Value::Dictionary(props));
-            plist::Value::Dictionary(device_entry)
-        })
-        .collect();
+        let mut device_entry = plist::Dictionary::new();
+        device_entry.insert("DeviceID".into(), plist::Value::Integer(dev.device_id.into()));
+        device_entry.insert("Properties".into(), plist::Value::Dictionary(props));
+        device_dict.insert(dev.device_id.to_string(), plist::Value::Dictionary(device_entry));
+    }
 
     let mut plist = plist::Dictionary::new();
-    plist.insert("DeviceList".into(), plist::Value::Array(device_list));
+    plist.insert("DeviceList".into(), plist::Value::Dictionary(device_dict));
     RawPacket::new(plist, XML_PLIST_VERSION, PLIST_MESSAGE_TYPE, tag)
 }
 

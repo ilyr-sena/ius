@@ -51,7 +51,10 @@ pub async fn handle_client(
                     let s = scanner.read().unwrap();
                     s.get_devices()
                 };
-                debug!("returning {} device(s)", devices.len());
+                info!("ListDevices: returning {} device(s)", devices.len());
+                for d in &devices {
+                    info!("  - id={} serial={}", d.device_id, d.udid);
+                }
                 let resp = protocol::make_device_list_response(packet.tag, &devices);
                 if let Err(e) = resp.write_to(&mut stream).await {
                     warn!("failed to write device list: {e}");
@@ -104,7 +107,8 @@ pub async fn handle_client(
                 };
                 let port = match packet.plist.get("PortNumber") {
                     Some(plist::Value::Integer(i)) => {
-                        i.as_unsigned().unwrap_or(0) as u16
+                        let raw = i.as_unsigned().unwrap_or(0) as u16;
+                        u16::from_be(raw)
                     }
                     _ => 0,
                 };

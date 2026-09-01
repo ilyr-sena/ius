@@ -766,7 +766,7 @@ impl ConnectionManager {
 
                 conn.tx_seq = our_seq.wrapping_add(1);
                 conn.tx_ack = our_ack;
-                conn.rx_seq = peer_seq;
+                conn.rx_seq = peer_seq.wrapping_add(1);
                 conn.rx_recvd = our_ack;
                 conn.state = ConnState::Connected;
                 conn.last_ack_time = Instant::now();

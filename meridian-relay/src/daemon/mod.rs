@@ -13,13 +13,21 @@ use tracing::{info, error};
 use device_scanner::{DeviceScanner, DeviceChange};
 use device_manager::DeviceManager;
 
-const SOCKET_PATH: &str = "/tmp/meridian-relay-usbmuxd.sock";
+const SOCKET_PATH: &str = "/var/run/usbmuxd";
 
 pub async fn run_daemon() -> Result<(), Box<dyn std::error::Error>> {
     let _ = std::fs::remove_file(SOCKET_PATH);
 
     let listener = UnixListener::bind(SOCKET_PATH)?;
     info!("usbmuxd daemon listening on {SOCKET_PATH}");
+
+    // Set permissions so non-root clients can connect
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(0o666);
+        let _ = std::fs::set_permissions(SOCKET_PATH, perms);
+    }
 
     // SAFETY: set early before threads
     unsafe { std::env::set_var("USBMUXD_SOCKET_ADDRESS", SOCKET_PATH); }
