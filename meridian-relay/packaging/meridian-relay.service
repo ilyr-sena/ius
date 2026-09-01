@@ -1,0 +1,34 @@
+[Unit]
+Description=Meridian Relay - iOS USB multiplexing daemon (usbmuxd-compatible)
+Documentation=file:///usr/share/doc/meridian-relay/README.md
+# Conflict with the classic daemon — they own the same socket.
+Conflicts=usbmuxd.service
+After=local-fs.target
+
+[Service]
+Type=notify
+NotifyAccess=main
+ExecStart=/usr/bin/meridian-relay --log-format json daemon
+Restart=on-failure
+RestartSec=2s
+TimeoutStopSec=10s
+
+# --- Hardening -----------------------------------------------------------
+# Needs: USB device access (via udev/rules), /var/run + /var/lib/lockdown.
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/run /var/lib/lockdown
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+# Device access is normally granted via udev rules for VID 05ac, e.g.:
+#   SUBSYSTEM=="usb", ATTR{idVendor}=="05ac", MODE="0660", GROUP="usbmux"
+# Install such a rule and run this unit as a dedicated user, or keep the
+# default (root) until your rules are in place.
+
+[Install]
+WantedBy=multi-user.target

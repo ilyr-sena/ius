@@ -1,20 +1,33 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{mpsc, oneshot, RwLock};
+use std::sync::atomic::Ordering;
+use tokio::sync::mpsc;
+use tokio::sync::oneshot;
 use tracing::{debug, info, warn};
 
 use super::mux::{
     ConnState, ConnectionManager, ConnectionEvent, DeviceState,
     build_version_request, build_setup_packet, build_tcp_packet, build_control_packet,
-    parse_packet, MuxPacket, TCP_SYN, TCP_ACK, INITIAL_WINDOW,
+    parse_packet, scaled_window, MuxPacket, TCP_SYN, TCP_ACK, INITIAL_WINDOW,
 };
-use super::usb::{AppleMuxInterface, UsbReader, PacketReassembler};
+use super::usb::{AppleMuxInterface, UsbReader};
+use super::mux::PacketReassembler;
 use crate::daemon::device_scanner::UsbDevice;
+use crate::config::DaemonConfig;
+use crate::metrics::Metrics;
+
+/// Message sent from client proxies to the per-device processing task.
+pub enum MuxOutMsg {
+    /// Raw payload to transmit on the given source port.
+    Data { sport: u16, payload: Vec<u8> },
+    /// The client has drained the connection buffer; send a window update ACK.
+    WindowUpdate { sport: u16 },
+}
 
 pub struct ManagedDevice {
     pub device_id: u32,
     pub usb: Arc<AppleMuxInterface>,
-    pub data_tx: mpsc::Sender<(u16, Vec<u8>)>,
+    pub data_tx: mpsc::Sender<MuxOutMsg>,
     pub connect_tx: mpsc::Sender<ConnectRequest>,
     pub refcount: u32,
 }
@@ -27,15 +40,19 @@ pub struct ConnectRequest {
 }
 
 pub struct DeviceManager {
-    pub devices: Arc<RwLock<HashMap<u32, ManagedDevice>>>,
+    pub devices: Arc<tokio::sync::RwLock<HashMap<u32, ManagedDevice>>>,
     pub conn_mgr: ConnectionManager,
+    pub config: DaemonConfig,
+    pub metrics: Arc<Metrics>,
 }
 
 impl DeviceManager {
-    pub fn new() -> Self {
+    pub fn new(config: DaemonConfig, metrics: Arc<Metrics>) -> Self {
         Self {
-            devices: Arc::new(RwLock::new(HashMap::new())),
+            devices: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             conn_mgr: ConnectionManager::new(),
+            config,
+            metrics,
         }
     }
 
@@ -65,6 +82,7 @@ impl DeviceManager {
         }
 
         let udid_for_block = dev.udid.clone();
+        let usb_timeout = self.config.usb_timeout;
         let usb = match tokio::task::spawn_blocking(move || -> Result<Arc<AppleMuxInterface>, ()> {
             let all_devices = match rusb::devices() {
                 Ok(d) => d,
@@ -96,7 +114,7 @@ impl DeviceManager {
                 }
             };
 
-            match AppleMuxInterface::open(&rusb_dev) {
+            match AppleMuxInterface::open(&rusb_dev, usb_timeout) {
                 Ok(u) => Ok(Arc::new(u)),
                 Err(e) => {
                     warn!("failed to open mux interface for {udid_for_block}: {e} (will retry next scan)");
@@ -110,11 +128,13 @@ impl DeviceManager {
             }
         };
 
-        let (usb_tx, usb_rx) = mpsc::channel::<Vec<u8>>(64);
-        let (data_tx, data_rx) = mpsc::channel::<(u16, Vec<u8>)>(256);
-        let (connect_tx, connect_rx) = mpsc::channel::<ConnectRequest>(16);
+        let (usb_tx, usb_rx) = mpsc::channel::<Vec<u8>>(self.config.max_data_channel);
+        let (data_tx, data_rx) = mpsc::channel::<MuxOutMsg>(self.config.max_data_channel);
+        let (connect_tx, connect_rx) = mpsc::channel::<ConnectRequest>(self.config.connect_channel);
 
-        let reader = UsbReader::new(usb.clone(), usb_tx.clone());
+        // Single ordered reader: concurrent bulk reads on one endpoint can
+        // complete out of order and corrupt the mux byte stream.
+        let reader = UsbReader::new(usb.clone(), usb_tx.clone(), self.metrics.clone());
         reader.spawn();
 
         let managed = ManagedDevice {
@@ -130,6 +150,9 @@ impl DeviceManager {
             devices.insert(dev.device_id, managed);
         }
 
+        // NOTE: devices_attached is owned by the scanner loop (it stores the
+        // authoritative scan count); do not increment here.
+
         self.conn_mgr.add_device(dev.device_id).await;
 
         let version_pkt = build_version_request(0, 0xFFFF);
@@ -144,9 +167,13 @@ impl DeviceManager {
         };
         let device_id = dev.device_id;
         let usb_for_task = usb.clone();
+        let metrics = self.metrics.clone();
+        let max_conn_buffer = self.config.max_conn_buffer;
+        let max_reassembly_bytes = self.config.max_reassembly_bytes;
+        let devices_map = self.devices.clone();
 
         tokio::spawn(async move {
-            let mut reassembler = PacketReassembler::new();
+            let mut reassembler = PacketReassembler::new(max_reassembly_bytes);
             let mut version_negotiated = false;
             let mut usb_rx = usb_rx;
             let mut data_rx = data_rx;
@@ -159,18 +186,22 @@ impl DeviceManager {
                     result = usb_rx.recv() => {
                         match result {
                             Some(raw_data) => {
-                                if let Some(packet_data) = reassembler.feed(&raw_data, None) {
+                                metrics.usb_rx_bytes.fetch_add(raw_data.len() as u64, Ordering::Relaxed);
+                                for packet_data in reassembler.feed(&raw_data) {
                                     Self::process_device_packet(
                                         &conn_mgr,
                                         &usb_for_task,
                                         device_id,
                                         &packet_data,
                                         &mut version_negotiated,
+                                        &metrics,
+                                        max_conn_buffer,
                                     ).await;
                                 }
                             }
                             None => {
                                 info!("USB read channel closed for device {device_id} — disconnect detected");
+                                Self::handle_usb_disconnect(&conn_mgr, &devices_map, device_id).await;
                                 disconnect_detected = true;
                                 break;
                             }
@@ -179,13 +210,24 @@ impl DeviceManager {
 
                     result = data_rx.recv() => {
                         match result {
-                            Some((sport, data)) => {
+                            Some(MuxOutMsg::Data { sport, payload }) => {
                                 Self::send_client_data(
                                     &conn_mgr,
                                     &usb_for_task,
                                     device_id,
                                     sport,
-                                    &data,
+                                    &payload,
+                                    &metrics,
+                                ).await;
+                            }
+                            Some(MuxOutMsg::WindowUpdate { sport }) => {
+                                Self::send_window_update(
+                                    &conn_mgr,
+                                    &usb_for_task,
+                                    device_id,
+                                    sport,
+                                    max_conn_buffer,
+                                    &metrics,
                                 ).await;
                             }
                             None => {
@@ -202,11 +244,13 @@ impl DeviceManager {
                                     devices: conn_mgr.devices.clone(),
                                 };
                                 let usb_clone = usb_for_task.clone();
+                                let metrics_clone = metrics.clone();
                                 tokio::spawn(async move {
                                     Self::handle_connect_request(
                                         &conn_mgr_clone,
                                         &usb_clone,
                                         req,
+                                        &metrics_clone,
                                     ).await;
                                 });
                             }
@@ -235,7 +279,73 @@ impl DeviceManager {
             devices.remove(&device_id);
         }
         self.conn_mgr.remove_device(device_id).await;
+        // NOTE: devices_attached is owned by the scanner loop; do not decrement here.
         info!("device {device_id} removed from manager");
+    }
+
+    /// Handle USB-layer disconnect: tear down all connections and drop the
+    /// managed device so its USB handle and channels are released.
+    async fn handle_usb_disconnect(
+        conn_mgr: &ConnectionManager,
+        devices_map: &Arc<tokio::sync::RwLock<HashMap<u32, ManagedDevice>>>,
+        device_id: u32,
+    ) {
+        Self::cleanup_device_connections(conn_mgr, device_id).await;
+
+        let mut devices = devices_map.write().await;
+        if devices.remove(&device_id).is_some() {
+            info!("device {device_id} removed from manager after USB disconnect");
+        }
+    }
+
+    /// After the client drains buffered data, advertise the reopened window so
+    /// the device can resume sending.
+    async fn send_window_update(
+        conn_mgr: &ConnectionManager,
+        usb: &Arc<AppleMuxInterface>,
+        device_id: u32,
+        sport: u16,
+        max_conn_buffer: usize,
+        metrics: &Arc<Metrics>,
+    ) {
+        let pkt = {
+            let devices = conn_mgr.devices.read().await;
+            let device = match devices.get(&device_id) {
+                Some(d) => d,
+                None => return,
+            };
+            let conn = match device.connections.get(&sport) {
+                Some(c) => c,
+                None => return,
+            };
+            if !conn.state.is_active() {
+                return;
+            }
+            let free = max_conn_buffer.saturating_sub(conn.ib_buf.len());
+            build_tcp_packet(
+                device.version,
+                device.tx_seq,
+                device.rx_seq,
+                sport,
+                conn.dest_port,
+                conn.tx_seq,
+                conn.tx_ack,
+                TCP_ACK,
+                scaled_window(free),
+                None,
+            )
+        };
+
+        metrics.usb_tx_bytes.fetch_add(pkt.len() as u64, Ordering::Relaxed);
+        if let Err(e) = usb.send(&pkt) {
+            warn!("failed to send window update for device {device_id} sport={sport}: {e}");
+            return;
+        }
+
+        let mut devices = conn_mgr.devices.write().await;
+        if let Some(device) = devices.get_mut(&device_id) {
+            device.tx_seq = device.tx_seq.wrapping_add(1);
+        }
     }
 
     async fn cleanup_device_connections(conn_mgr: &ConnectionManager, device_id: u32) {
@@ -258,10 +368,13 @@ impl DeviceManager {
         device_id: u32,
         data: &[u8],
         version_negotiated: &mut bool,
+        metrics: &Arc<Metrics>,
+        max_conn_buffer: usize,
     ) {
         let packet = match parse_packet(data) {
             Ok(p) => p,
             Err(e) => {
+                metrics.parse_errors.fetch_add(1, Ordering::Relaxed);
                 warn!("failed to parse mux packet on device {device_id}: {e}");
                 return;
             }
@@ -318,8 +431,9 @@ impl DeviceManager {
             }
 
             MuxPacket::Tcp { header, payload } => {
-                let (events, send_queue) = conn_mgr.handle_tcp_packet(device_id, &header, &payload).await;
+                let (events, send_queue) = conn_mgr.handle_tcp_packet(device_id, &header, &payload, metrics, max_conn_buffer).await;
                 for pkt in send_queue {
+                    metrics.usb_tx_bytes.fetch_add(pkt.len() as u64, Ordering::Relaxed);
                     if let Err(e) = usb.send(&pkt) {
                         warn!("failed to send queued packet on device {device_id}: {e}");
                     }
@@ -336,6 +450,7 @@ impl DeviceManager {
                             debug!("device {device_id} data ready on sport={sport}");
                         }
                         ConnectionEvent::Disconnected { device_id: _, sport } => {
+                            metrics.rsts_received.fetch_add(1, Ordering::Relaxed);
                             info!("device {device_id} connection disconnected on sport={sport}");
                         }
                         ConnectionEvent::Error { device_id: _, sport, error } => {
@@ -353,6 +468,7 @@ impl DeviceManager {
         device_id: u32,
         sport: u16,
         data: &[u8],
+        metrics: &Arc<Metrics>,
     ) {
         let (pkt, data_len) = {
             let devices = conn_mgr.devices.read().await;
@@ -386,7 +502,7 @@ impl DeviceManager {
                 device.tx_seq,
                 device.rx_seq,
                 sport,
-                conn.dport,
+                conn.dest_port,
                 tcp_seq,
                 tcp_ack,
                 TCP_ACK,
@@ -397,6 +513,7 @@ impl DeviceManager {
             (pkt, data.len() as u32)
         };
 
+        metrics.usb_tx_bytes.fetch_add(pkt.len() as u64, Ordering::Relaxed);
         if let Err(e) = usb.send(&pkt) {
             warn!("failed to send TCP data for device {device_id} sport={sport}: {e}");
             return;
@@ -407,7 +524,7 @@ impl DeviceManager {
             device.tx_seq = device.tx_seq.wrapping_add(1);
             if let Some(conn) = device.connections.get_mut(&sport) {
                 conn.tx_seq = conn.tx_seq.wrapping_add(data_len);
-                conn.ob_buf.extend_from_slice(data);
+                    conn.ob_buf.extend(data.iter().copied());
             }
         }
     }
@@ -416,10 +533,14 @@ impl DeviceManager {
         conn_mgr: &ConnectionManager,
         usb: &Arc<AppleMuxInterface>,
         req: ConnectRequest,
+        metrics: &Arc<Metrics>,
     ) {
+        metrics.connects_total.fetch_add(1, Ordering::Relaxed);
+
         let sport = match conn_mgr.start_connect(req.device_id, req.dport, req.tag).await {
             Ok(s) => s,
             Err(e) => {
+                metrics.connect_failures.fetch_add(1, Ordering::Relaxed);
                 let _ = req.resp_tx.send(Err(format!("connect failed: {e}")));
                 return;
             }
@@ -429,6 +550,7 @@ impl DeviceManager {
         let device = match devices.get(&req.device_id) {
             Some(d) => d,
             None => {
+                metrics.connect_failures.fetch_add(1, Ordering::Relaxed);
                 let _ = req.resp_tx.send(Err("device not found".into()));
                 return;
             }
@@ -437,6 +559,7 @@ impl DeviceManager {
         let conn = match device.connections.get(&sport) {
             Some(c) => c,
             None => {
+                metrics.connect_failures.fetch_add(1, Ordering::Relaxed);
                 let _ = req.resp_tx.send(Err("connection not found".into()));
                 return;
             }
@@ -447,7 +570,7 @@ impl DeviceManager {
             device.tx_seq,
             device.rx_seq,
             sport,
-            conn.dport,
+            conn.dest_port,
             0,
             0,
             TCP_SYN,
@@ -458,6 +581,7 @@ impl DeviceManager {
         drop(devices);
 
         if let Err(e) = usb.send(&syn_pkt) {
+            metrics.connect_failures.fetch_add(1, Ordering::Relaxed);
             warn!("failed to send SYN for device {} sport={sport}: {e}", req.device_id);
             let _ = req.resp_tx.send(Err(format!("SYN send failed: {e}")));
             return;
@@ -472,6 +596,7 @@ impl DeviceManager {
 
         loop {
             if start.elapsed() > timeout {
+                metrics.connect_failures.fetch_add(1, Ordering::Relaxed);
                 warn!("connect timeout for device {} sport={sport}", req.device_id);
                 let _ = req.resp_tx.send(Err("connect timeout".into()));
                 return;
@@ -488,11 +613,13 @@ impl DeviceManager {
                                 return;
                             }
                             ConnState::Refused => {
+                                metrics.connect_failures.fetch_add(1, Ordering::Relaxed);
                                 warn!("connection refused for device {} sport={sport}", req.device_id);
                                 let _ = req.resp_tx.send(Err("connection refused".into()));
                                 return;
                             }
                             ConnState::Dead => {
+                                metrics.connect_failures.fetch_add(1, Ordering::Relaxed);
                                 warn!("connection dead for device {} sport={sport}", req.device_id);
                                 let _ = req.resp_tx.send(Err("connection dead".into()));
                                 return;
@@ -526,7 +653,15 @@ impl DeviceManager {
             resp_tx,
         };
 
-        device.connect_tx.send(req).await.map_err(|e| format!("channel send failed: {e}"))?;
+        match device.connect_tx.try_send(req) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                return Err("device busy (too many pending connects)".into());
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                return Err("device processing task stopped".into());
+            }
+        }
         drop(devices);
 
         resp_rx.await.map_err(|e| format!("channel recv failed: {e}"))?
@@ -545,12 +680,14 @@ fn build_device_capabilities() -> Vec<u8> {
     caps.insert("FeatureSet".into(), plist::Value::Dictionary(features));
 
     let mut buf = Vec::new();
-    plist::to_writer_xml(&mut buf, &plist::Value::Dictionary(caps)).unwrap_or_default();
+    if let Err(e) = plist::to_writer_xml(&mut buf, &plist::Value::Dictionary(caps)) {
+        tracing::error!("failed to serialize device capabilities: {e}");
+    }
     buf
 }
 
 impl Default for DeviceManager {
     fn default() -> Self {
-        Self::new()
+        Self::new(DaemonConfig::default(), std::sync::Arc::new(Metrics::new()))
     }
 }

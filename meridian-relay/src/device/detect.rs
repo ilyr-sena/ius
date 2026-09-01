@@ -1,196 +1,107 @@
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
-use tracing::debug;
+use tracing::{debug, info};
 
-use crate::daemon::device_scanner::UsbDevice;
+use crate::daemon::protocol::{self, RawPacket, PLIST_MESSAGE_TYPE, XML_PLIST_VERSION};
+use crate::device::{ConnectionType, Device};
+use crate::config::DEFAULT_SOCKET_PATH;
 
-const USBMUXD_SOCKET: &str = "/var/run/usbmuxd";
+/// Maximum plist response accepted from the daemon (16 MiB, matches server cap).
+const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 
-pub fn ensure_daemon_socket_env() {
-    // No-op: daemon always binds to /var/run/usbmuxd
+pub async fn list_devices() -> Result<Vec<Device>, Box<dyn std::error::Error>> {
+    list_devices_from(DEFAULT_SOCKET_PATH).await
 }
 
-pub fn raw_to_usb_device(raw: &UsbmuxdDeviceInfo) -> UsbDevice {
-    UsbDevice {
-        device_id: raw.device_id,
-        udid: raw.udid.clone(),
-        product_id: raw.product_id,
-        usb_bus: 0,
-        usb_address: 0,
-    }
-}
+pub async fn list_devices_from(socket_path: &str) -> Result<Vec<Device>, Box<dyn std::error::Error>> {
+    let socket_path = std::env::var("USBMUXD_SOCKET_ADDRESS")
+        .unwrap_or_else(|_| socket_path.to_string());
 
-pub struct UsbmuxdClient {
-    stream: UnixStream,
-    tag: u32,
-}
+    debug!("connecting to usbmuxd at {socket_path}");
 
-impl UsbmuxdClient {
-    pub async fn connect() -> Result<Self, std::io::Error> {
-        let stream = UnixStream::connect(USBMUXD_SOCKET).await?;
-        Ok(Self { stream, tag: 1 })
-    }
+    let mut stream = UnixStream::connect(&socket_path).await?;
 
-    fn next_tag(&mut self) -> u32 {
-        let tag = self.tag;
-        self.tag = self.tag.wrapping_add(1);
-        tag
-    }
+    let mut plist = plist::Dictionary::new();
+    plist.insert("ClientVersion".into(), plist::Value::Integer(1.into()));
+    plist.insert("MessageType".into(), plist::Value::String("ListDevices".into()));
+    plist.insert("ProgName".into(), plist::Value::String("meridian-relay".into()));
+    plist.insert("kLibUSBMuxVersion".into(), plist::Value::Integer(0.into()));
 
-    pub async fn send_list_devices(&mut self) -> Result<Vec<UsbmuxdDeviceInfo>, std::io::Error> {
-        let tag = self.next_tag();
-        let mut plist = plist::Dictionary::new();
-        plist.insert("MessageType".into(), plist::Value::String("ListDevices".into()));
-        plist.insert("ClientVersion".into(), plist::Value::Integer(1.into()));
+    let request = RawPacket::new(plist, XML_PLIST_VERSION, PLIST_MESSAGE_TYPE, 1);
+    request.write_to(&mut stream).await?;
 
-        write_plist_packet(&mut self.stream, &plist, tag).await?;
+    let response = protocol::read_packet(&mut stream, MAX_RESPONSE_BYTES).await?;
+    let plist_dict = response.plist;
 
-        let response = read_plist_packet(&mut self.stream).await?;
-
-        let devices = match response.get("DeviceList") {
-            Some(plist::Value::Array(arr)) => {
-                let mut result = Vec::new();
-                for item in arr {
-                    if let plist::Value::Dictionary(entry) = item {
-                        if let Some(plist::Value::Dictionary(props)) = entry.get("Properties") {
-                            result.push(UsbmuxdDeviceInfo::from_plist(props));
-                        }
-                    }
-                }
-                result
-            }
-            _ => Vec::new(),
-        };
-
-        debug!("ListDevices returned {} device(s)", devices.len());
-        Ok(devices)
-    }
-
-    pub async fn send_listen(&mut self) -> Result<(), std::io::Error> {
-        let tag = self.next_tag();
-        let mut plist = plist::Dictionary::new();
-        plist.insert("MessageType".into(), plist::Value::String("Listen".into()));
-
-        write_plist_packet(&mut self.stream, &plist, tag).await?;
-        Ok(())
-    }
-
-    pub async fn read_event(&mut self) -> Result<ListenEvent, std::io::Error> {
-        let response = read_plist_packet(&mut self.stream).await?;
-
-        let msg = match response.get("MessageType") {
-            Some(plist::Value::String(s)) => s.clone(),
-            _ => return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "no MessageType")),
-        };
-
-        match msg.as_str() {
-            "Attached" => {
-                let device_id = response.get("DeviceID")
-                    .and_then(|v| v.as_unsigned_integer())
-                    .unwrap_or(0) as u32;
-                let props = response.get("Properties")
-                    .and_then(|v| v.as_dictionary())
-                    .cloned()
-                    .unwrap_or_default();
-                Ok(ListenEvent::Attached(UsbmuxdDeviceInfo::from_plist_with_id(&props, device_id)))
-            }
-            "Detached" => {
-                let device_id = response.get("DeviceID")
-                    .and_then(|v| v.as_unsigned_integer())
-                    .unwrap_or(0) as u32;
-                Ok(ListenEvent::Detached(device_id))
-            }
-            other => {
-                Err(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("unexpected event: {other}")))
+    if let Some(result) = plist_dict.get("Result") {
+        if let Some(status) = result.as_unsigned_integer() {
+            if status != 0 {
+                return Err(format!("list devices failed with status {status}").into());
             }
         }
     }
-}
 
-#[derive(Debug, Clone)]
-pub enum ListenEvent {
-    Attached(UsbmuxdDeviceInfo),
-    Detached(u32),
-}
+    let device_list = plist_dict.get("DeviceList")
+        .and_then(|v| v.as_array())
+        .ok_or("DeviceList missing or not an array")?;
 
-#[derive(Debug, Clone)]
-pub struct UsbmuxdDeviceInfo {
-    pub device_id: u32,
-    pub udid: String,
-    pub product_id: u16,
-    pub connection_type: String,
-}
+    let mut devices = Vec::new();
+    for device_entry in device_list {
+        let device_dict = match device_entry.as_dictionary() {
+            Some(d) => d,
+            None => continue,
+        };
 
-impl UsbmuxdDeviceInfo {
-    fn from_plist(props: &plist::Dictionary) -> Self {
-        let device_id = props.get("DeviceID")
-            .and_then(|v| v.as_unsigned_integer())
-            .unwrap_or(0) as u32;
-        Self::from_plist_with_id(props, device_id)
-    }
+        let props = match device_dict.get("Properties") {
+            Some(plist::Value::Dictionary(d)) => d,
+            _ => continue,
+        };
 
-    fn from_plist_with_id(props: &plist::Dictionary, device_id: u32) -> Self {
         let udid = props.get("SerialNumber")
             .and_then(|v| v.as_string())
             .unwrap_or("")
             .to_string();
-        let product_id = props.get("ProductID")
-            .and_then(|v| v.as_unsigned_integer())
-            .unwrap_or(0) as u16;
-        let connection_type = props.get("ConnectionType")
+
+        let model = props.get("ProductType")
             .and_then(|v| v.as_string())
-            .unwrap_or("USB")
-            .to_string();
+            .map(|s| s.to_string());
 
-        Self { device_id, udid, product_id, connection_type }
+        let device_id = props.get("DeviceID")
+            .and_then(|v| v.as_unsigned_integer())
+            .unwrap_or(0) as u32;
+
+        let connection_type_str = props.get("ConnectionType")
+            .and_then(|v| v.as_string())
+            .unwrap_or("unknown");
+
+        let connection_type = match connection_type_str {
+            "USB" => ConnectionType::Usb,
+            _ => ConnectionType::Network,
+        };
+
+        debug!("found device: {udid} (device_id={device_id})");
+
+        devices.push(Device {
+            udid,
+            device_id,
+            name: None,
+            model,
+            ios_version: None,
+            build_version: None,
+            connection_type,
+        });
     }
+
+    info!("found {} device(s)", devices.len());
+    Ok(devices)
 }
 
-async fn write_plist_packet(
-    stream: &mut UnixStream,
-    plist: &plist::Dictionary,
-    tag: u32,
-) -> Result<(), std::io::Error> {
-    let mut plist_bytes = Vec::new();
-    plist::to_writer_xml(&mut plist_bytes, &plist::Value::Dictionary(plist.clone()))
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    let total_size = (plist_bytes.len() + 16) as u32;
-
-    let mut packet = Vec::with_capacity(total_size as usize);
-    packet.extend_from_slice(&total_size.to_le_bytes());
-    packet.extend_from_slice(&1u32.to_le_bytes());
-    packet.extend_from_slice(&8u32.to_le_bytes());
-    packet.extend_from_slice(&tag.to_le_bytes());
-    packet.extend_from_slice(&plist_bytes);
-
-    stream.write_all(&packet).await?;
-    Ok(())
-}
-
-async fn read_plist_packet(stream: &mut UnixStream) -> Result<plist::Dictionary, std::io::Error> {
-    let mut header = [0u8; 16];
-    stream.read_exact(&mut header).await?;
-
-    let size = u32::from_le_bytes(header[0..4].try_into().unwrap());
-    if size < 16 {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!("packet size too small: {size} bytes"),
-        ));
+    #[test]
+    fn test_list_devices_from_invalid_path() {
+        let result = tokio_test::block_on(list_devices_from("/nonexistent/socket"));
+        assert!(result.is_err());
     }
-    let body_size = (size - 16) as usize;
-    let mut body = vec![0u8; body_size];
-    stream.read_exact(&mut body).await?;
-
-    let plist: plist::Dictionary = if body.len() > 0 && body[0] == b'b' {
-        let mut cursor = std::io::Cursor::new(&body);
-        plist::from_reader(&mut cursor)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("binary plist parse error: {e}")))?
-    } else {
-        plist::from_bytes(&body)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("xml plist parse error: {e}")))?
-    };
-
-    Ok(plist)
 }
