@@ -85,9 +85,10 @@ pub fn make_result_response(tag: u32, number: u32) -> RawPacket {
 }
 
 pub fn make_device_list_response(tag: u32, devices: &[crate::daemon::device_scanner::UsbDevice]) -> RawPacket {
-    let mut device_dict = plist::Dictionary::new();
+    let mut device_array = Vec::new();
     for dev in devices {
         let mut props = plist::Dictionary::new();
+        props.insert("DeviceID".into(), plist::Value::Integer(dev.device_id.into()));
         props.insert("ConnectionType".into(), plist::Value::String("USB".into()));
         props.insert("SerialNumber".into(), plist::Value::String(dev.udid.clone()));
         props.insert("ProductID".into(), plist::Value::Integer(dev.product_id.into()));
@@ -95,18 +96,18 @@ pub fn make_device_list_response(tag: u32, devices: &[crate::daemon::device_scan
         props.insert("Port".into(), plist::Value::Integer(0.into()));
 
         let mut device_entry = plist::Dictionary::new();
-        device_entry.insert("DeviceID".into(), plist::Value::Integer(dev.device_id.into()));
         device_entry.insert("Properties".into(), plist::Value::Dictionary(props));
-        device_dict.insert(dev.device_id.to_string(), plist::Value::Dictionary(device_entry));
+        device_array.push(plist::Value::Dictionary(device_entry));
     }
 
     let mut plist = plist::Dictionary::new();
-    plist.insert("DeviceList".into(), plist::Value::Dictionary(device_dict));
+    plist.insert("DeviceList".into(), plist::Value::Array(device_array));
     RawPacket::new(plist, XML_PLIST_VERSION, PLIST_MESSAGE_TYPE, tag)
 }
 
 pub fn make_attached_event(tag: u32, device: &crate::daemon::device_scanner::UsbDevice) -> RawPacket {
     let mut props = plist::Dictionary::new();
+    props.insert("DeviceID".into(), plist::Value::Integer(device.device_id.into()));
     props.insert("ConnectionType".into(), plist::Value::String("USB".into()));
     props.insert("SerialNumber".into(), plist::Value::String(device.udid.clone()));
     props.insert("ProductID".into(), plist::Value::Integer(device.product_id.into()));
