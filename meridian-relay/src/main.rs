@@ -209,7 +209,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
 
             let mut enriched = device.clone();
-            enrich_device_info(&mut enriched).await;
+            let ep = Endpoint::parse(&endpoint)?;
+            enrich_device_info(&mut enriched, &ep).await;
             print_device_info(&enriched, no_color);
         }
 

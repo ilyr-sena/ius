@@ -1,5 +1,6 @@
 pub mod detect;
 pub mod info;
+pub mod lockdown;
 pub mod monitor;
 
 use serde::Serialize;

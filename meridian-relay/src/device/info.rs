@@ -3,8 +3,23 @@ use tokio::process::Command;
 use tracing::{debug, warn};
 
 use super::Device;
+use crate::daemon::transport::Endpoint;
 
-pub async fn enrich_device_info(device: &mut Device) {
+/// Enrich a device's fields. Primary: lockdown GetValue over the daemon's own
+/// endpoint (works on both platforms and both backends — direct USB or relay
+/// to an upstream mux service; no external tools required). Fallback: the
+/// `ideviceinfo` binary when present (a nice-to-have on top, not a dep).
+pub async fn enrich_device_info(device: &mut Device, endpoint: &Endpoint) {
+    super::lockdown::enrich_via_lockdown(device, endpoint).await;
+
+    // Fill in anything still missing via ideviceinfo when available (unix
+    // power tool; simply absent by default on Windows).
+    if device.name.is_none() || device.ios_version.is_none() {
+        enrich_via_ideviceinfo(device).await;
+    }
+}
+
+async fn enrich_via_ideviceinfo(device: &mut Device) {
     let udid = device.udid.trim().trim_end_matches('\0').to_string();
 
     let output = match tokio::time::timeout(
@@ -35,12 +50,21 @@ pub async fn enrich_device_info(device: &mut Device) {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let values = parse_ideviceinfo_output(&stdout);
 
-    device.name = values.get("DeviceName").cloned();
-    device.model = values
-        .get("ProductType")
-        .map(|s| model_name(s).unwrap_or(s).to_string());
-    device.ios_version = values.get("ProductVersion").cloned();
-    device.build_version = values.get("BuildVersion").cloned();
+    // Fill gaps only — lockdown already gave us the primary values.
+    if device.name.is_none() {
+        device.name = values.get("DeviceName").cloned();
+    }
+    if device.model.is_none() {
+        device.model = values
+            .get("ProductType")
+            .map(|s| model_name(s).unwrap_or(s).to_string());
+    }
+    if device.ios_version.is_none() {
+        device.ios_version = values.get("ProductVersion").cloned();
+    }
+    if device.build_version.is_none() {
+        device.build_version = values.get("BuildVersion").cloned();
+    }
 
     debug!(
         "enriched {}: name={:?} model={:?} ios={:?} build={:?}",
@@ -48,57 +72,12 @@ pub async fn enrich_device_info(device: &mut Device) {
     );
 }
 
-pub async fn enrich_all(devices: &mut [Device]) {
-    // Query all devices in parallel
-    let handles: Vec<_> = devices
+pub async fn enrich_all(devices: &mut [Device], endpoint: &Endpoint) {
+    // Parallel lockdown GetValue enrichment across all devices.
+    let futures = devices
         .iter_mut()
-        .map(|dev| {
-            let udid = dev.udid.trim().trim_end_matches('\0').to_string();
-            async move {
-                let output = match tokio::time::timeout(
-                    std::time::Duration::from_secs(10),
-                    Command::new("ideviceinfo")
-                        .args(["-u", &udid])
-                        .output(),
-                )
-                .await
-                {
-                    Ok(Ok(o)) => o,
-                    Ok(Err(e)) => {
-                        warn!("ideviceinfo failed for {udid}: {e}");
-                        return (udid, None);
-                    }
-                    Err(_) => {
-                        warn!("ideviceinfo timed out for {udid}");
-                        return (udid, None);
-                    }
-                };
-
-                if !output.status.success() {
-                    return (udid, None);
-                }
-
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                let values = parse_ideviceinfo_output(&stdout);
-                (udid, Some(values))
-            }
-        })
-        .collect();
-
-    let results = futures::future::join_all(handles).await;
-
-    for (udid, values) in results {
-        if let Some(values) = values {
-            if let Some(dev) = devices.iter_mut().find(|d| d.udid.trim().trim_end_matches('\0') == udid.trim()) {
-                dev.name = values.get("DeviceName").cloned();
-                dev.model = values
-                    .get("ProductType")
-                    .map(|s| model_name(s).unwrap_or(s).to_string());
-                dev.ios_version = values.get("ProductVersion").cloned();
-                dev.build_version = values.get("BuildVersion").cloned();
-            }
-        }
-    }
+        .map(|d| super::lockdown::enrich_via_lockdown(d, endpoint));
+    futures::future::join_all(futures).await;
 }
 
 fn parse_ideviceinfo_output(output: &str) -> HashMap<String, String> {
@@ -111,7 +90,7 @@ fn parse_ideviceinfo_output(output: &str) -> HashMap<String, String> {
     map
 }
 
-fn model_name(identifier: &str) -> Option<&'static str> {
+pub fn model_name(identifier: &str) -> Option<&'static str> {
     match identifier {
         // iPhone
         "iPhone13,1" => Some("iPhone 12 mini"),
