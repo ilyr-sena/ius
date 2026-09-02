@@ -284,59 +284,49 @@ impl AsyncWrite for TransportStream {
 }
 
 /// Create a named-pipe instance with the given SDDL applied at creation time
-/// (no race window).
+/// (no race window). Uses tokio's pipe creation so the handle is correctly
+/// configured for overlapped I/O (required by the Tokio reactor).
 #[cfg(windows)]
 fn create_pipe_instance(
     name: &str,
     sddl: Option<&str>,
 ) -> io::Result<tokio::net::windows::named_pipe::NamedPipeServer> {
-    use windows_sys::Win32::System::Pipes::{
-        CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
-    };
-    use windows_sys::Win32::Storage::FileSystem::PIPE_ACCESS_DUPLEX;
-    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use tokio::net::windows::named_pipe::ServerOptions;
+    use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
 
     let full = format!(r"\\.\pipe\{name}");
-    let wide: Vec<u16> = full.encode_utf16().chain(std::iter::once(0)).collect();
 
-    let (sd, _size) = match sddl {
-        Some(s) => Some(unsafe { crate::platform::windows::sddl_to_security_descriptor(s) }?),
-        None => None,
-    }
-    .map(|(s, z)| (Some(s), z))
-    .unwrap_or((None, 0));
-
-    let sd_ptr = sd.map(|s| s).unwrap_or(std::ptr::null_mut());
-
-    let mut sec_attr = windows_sys::Win32::Security::SECURITY_ATTRIBUTES {
-        nLength: std::mem::size_of::<windows_sys::Win32::Security::SECURITY_ATTRIBUTES>() as u32,
-        lpSecurityDescriptor: sd_ptr as _,
-        bInheritHandle: 0,
+    // Build a SECURITY_ATTRIBUTES holding our DACL, or none for OS default.
+    let (sd_ptr, sec_attr) = match sddl {
+        Some(s) => {
+            let (sd, _size) = unsafe { crate::platform::windows::sddl_to_security_descriptor(s) }?;
+            let attr = SECURITY_ATTRIBUTES {
+                nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+                lpSecurityDescriptor: sd,
+                bInheritHandle: 0,
+            };
+            (sd, Some(attr))
+        }
+        None => (std::ptr::null_mut(), None),
     };
 
-    let handle = unsafe {
-        CreateNamedPipeW(
-            wide.as_ptr(),
-            PIPE_ACCESS_DUPLEX,
-            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
-            PIPE_UNLIMITED_INSTANCES,
-            65536,
-            65536,
-            0,
-            if sd_ptr.is_null() { std::ptr::null() } else { &mut sec_attr },
-        )
+    let mut options = ServerOptions::new();
+    options.reject_remote_clients(true); // local-only IPC, always
+
+    let result = match &sec_attr {
+        Some(attr) => unsafe {
+            // SAFETY: `attr` points to a valid SECURITY_ATTRIBUTES for the
+            // duration of the call (SD freed only after create returns).
+            options.create_with_security_attributes_raw(&full, &*attr as *const _ as *mut _)
+        },
+        None => options.create(&full),
     };
 
     if !sd_ptr.is_null() {
         unsafe { crate::platform::windows::free_security_descriptor(sd_ptr) };
     }
 
-    if handle == INVALID_HANDLE_VALUE {
-        return Err(io::Error::last_os_error());
-    }
-
-    // SAFETY: we own this fresh pipe handle.
-    Ok(unsafe { tokio::net::windows::named_pipe::NamedPipeServer::from_raw_handle(handle as _)? })
+    result
 }
 
 #[cfg(test)]
