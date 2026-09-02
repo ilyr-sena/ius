@@ -130,7 +130,6 @@ final class TinyHTTPServer {
             var out = Data(resp.utf8)
             out.append(outBody)
             conn.send(content: out, completion: .contentProcessed { _ in conn.cancel() })
-        }
     }
 
     static func wsAccept(key: String) -> String {
