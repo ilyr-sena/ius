@@ -43,9 +43,21 @@ pub fn deploy_inf() -> io::Result<PathBuf> {
     Ok(path)
 }
 
+/// Windows rejects unsigned driver packages: the catalog must be signed.
+/// 0xE000022F = ERROR_NO_CATALOG_FOR_OEM_INF.
+pub const ERROR_NO_CATALOG_FOR_OEM_INF: i32 = -536870353; // 0xE000022F
+
+/// What pnputil told us.
+pub enum StageOutcome {
+    Staged,
+    AlreadyStaged,
+    /// The INF is fine but unsigned — needs test-signing or a DSE-off boot.
+    UnsignedRejected,
+}
+
 /// Stage the driver into the Windows driver store via pnputil.
 /// After this, newly-attached Apple devices bind WinUSB automatically.
-pub fn stage_driver(inf_path: &std::path::Path) -> Result<(), String> {
+pub fn stage_driver(inf_path: &std::path::Path) -> Result<StageOutcome, String> {
     let output = std::process::Command::new("pnputil")
         .args(["/add-driver"])
         .arg(inf_path)
@@ -55,20 +67,28 @@ pub fn stage_driver(inf_path: &std::path::Path) -> Result<(), String> {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
+    let combined = format!("{stdout} {stderr}");
 
     if output.status.success() {
         tracing::info!("driver staged: {}", stdout.trim());
-        return Ok(());
+        return Ok(StageOutcome::Staged);
     }
-    // Already installed is success for our purposes.
-    if stdout.contains("already exists") || stdout.contains("was installed") {
-        return Ok(());
+    if combined.contains("already exists") || combined.contains("was installed") {
+        return Ok(StageOutcome::AlreadyStaged);
+    }
+    // Signature wall: pnputil reports a negative HRESULT when the package
+    // has no (acceptable) catalog signature.
+    let code = output.status.code().unwrap_or(0);
+    if code == ERROR_NO_CATALOG_FOR_OEM_INF
+        || combined.contains("digital signature")
+        || combined.contains("not contain digital signature")
+    {
+        return Ok(StageOutcome::UnsignedRejected);
     }
     Err(format!(
-        "pnputil /add-driver failed (code {:?}): {} {}",
+        "pnputil /add-driver failed (code {:?}): {}",
         output.status.code(),
-        stdout.trim(),
-        stderr.trim()
+        combined.trim()
     ))
 }
 
@@ -120,14 +140,42 @@ pub fn rebind_present_devices(inf_path: &std::path::Path) -> io::Result<u32> {
 }
 
 /// Full provisioning: deploy INF, stage, rebind. Returns human summary lines.
+///
+/// An unsigned-driver rejection is *not* a hard error — the caller prints
+/// remediation guidance and continues (e.g. with service install).
 pub fn provision() -> Result<Vec<String>, String> {
     let mut log = Vec::new();
 
     let inf = deploy_inf().map_err(|e| format!("failed to deploy INF: {e}"))?;
     log.push(format!("INF deployed: {}", inf.display()));
 
-    stage_driver(&inf)?;
-    log.push("driver staged in driver store (future devices will bind automatically)".into());
+    match stage_driver(&inf)? {
+        StageOutcome::Staged => {
+            log.push("driver staged in driver store (future devices bind automatically)".into());
+        }
+        StageOutcome::AlreadyStaged => {
+            log.push("driver already staged".into());
+        }
+        StageOutcome::UnsignedRejected => {
+            log.push("⚠  driver package REJECTED by Windows: unsigned catalog".into());
+            log.push("   Windows x64 requires a signed catalog (.cat) for driver install.".into());
+            log.push(String::new());
+            log.push("   To proceed on this machine for testing, either:".into());
+            log.push("     A) Boot once with driver signature enforcement disabled:".into());
+            log.push("          Settings → Recovery → Advanced startup → Restart now".into());
+            log.push("          → Troubleshoot → Advanced options → Startup Settings".into());
+            log.push("          → Restart → press 7 (Disable driver signature enforcement)".into());
+            log.push("        then re-run:  meridian-relay.exe setup".into());
+            log.push(String::new());
+            log.push("     B) Enable test signing and test-sign the catalog (for repeated use):".into());
+            log.push("          bcdedit /set testsigning on   (then reboot)".into());
+            log.push("        and sign the package with a test cert before staging.".into());
+            log.push(String::new());
+            log.push("   Production deployments must ship an attestation/WHQL-signed catalog.".into());
+            // Don't rebind attempt — the driver store has nothing new staged.
+            return Ok(log);
+        }
+    }
 
     match rebind_present_devices(&inf) {
         Ok(n) if n > 0 => log.push("rebound currently-attached device(s) to WinUSB".into()),
