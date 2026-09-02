@@ -165,11 +165,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match cli.command {
         Commands::List { format, json, hide_sensitive } => {
-            let devices = list_devices_from_str(&endpoint).await?;
+            let mut devices = list_devices_from_str(&endpoint).await?;
             if devices.is_empty() {
                 println!("no devices found");
                 return Ok(());
             }
+            // Enrich every listed device with name/model/iOS from lockdown.
+            let ep = Endpoint::parse(&endpoint)?;
+            meridian_relay::device::info::enrich_all(&mut devices, &ep).await;
             if json || format == "json" {
                 let output_devices: Vec<_> = devices.iter().map(|d| {
                     let mut dev = d.clone();
@@ -180,16 +183,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }).collect();
                 println!("{}", serde_json::to_string_pretty(&output_devices)?);
             } else {
-                println!("{:<4} {:<40} {:<12} {:<30}", "#", "UDID", "ID", "Model");
-                println!("{}", "-".repeat(90));
+                println!("{:<4} {:<26} {:<26} {:<40} {:<10} {:<12}", "#", "Name", "Model", "UDID", "ID", "iOS");
+                println!("{}", "-".repeat(120));
                 for (i, device) in devices.iter().enumerate() {
                     let udid_display = if hide_sensitive {
                         "***".to_string()
                     } else {
                         device.udid.clone()
                     };
+                    let name = device.name.as_deref().unwrap_or("?");
                     let model = device.model.as_deref().unwrap_or("?");
-                    println!("{:<4} {:<40} {:<12} {:<30}", i + 1, udid_display, device.device_id, model);
+                    let ios = device.ios_version.as_deref().unwrap_or("?");
+                    println!("{:<4} {:<26} {:<26} {:<40} {:<10} {:<12}", i + 1, name, model, udid_display, device.device_id, ios);
                 }
             }
         }
