@@ -5,8 +5,9 @@ use clap::Args;
 use serde::Deserialize;
 use tracing::warn;
 
-pub const DEFAULT_SOCKET_PATH: &str = "/var/run/usbmuxd";
-const DEFAULT_LOCKDOWN_DIR: &str = "/var/lib/lockdown";
+use crate::daemon::transport::Endpoint;
+use crate::platform;
+
 const DEFAULT_SCAN_INTERVAL_MS: u64 = 2000;
 const DEFAULT_USB_TIMEOUT_MS: u64 = 5000;
 const DEFAULT_CONNECT_TIMEOUT_MS: u64 = 5000;
@@ -28,17 +29,25 @@ pub struct DaemonArgs {
     #[arg(long = "config")]
     pub config_path: Option<PathBuf>,
 
-    /// USB mux daemon socket path
+    /// Daemon endpoint: unix:/path, pipe:name, or tcp:127.0.0.1:port
+    #[arg(short, long)]
+    pub endpoint: Option<String>,
+
+    /// [unix-only, legacy] unix socket path — prefer --endpoint
     #[arg(long = "socket-path")]
     pub socket_path: Option<PathBuf>,
 
-    /// Socket file permissions (octal, e.g. "0660")
+    /// Socket file permissions (octal, e.g. "0660") — unix only
     #[arg(long = "socket-mode")]
     pub socket_mode: Option<String>,
 
-    /// Socket owning group name
+    /// Socket owning group name — unix only (maps to an ACL group on windows)
     #[arg(long = "socket-group")]
     pub socket_group: Option<String>,
+
+    /// [windows] SDDL string for the named pipe DACL
+    #[arg(long = "pipe-security")]
+    pub pipe_security: Option<String>,
 
     /// Pair record directory path
     #[arg(long = "lockdown-dir")]
@@ -64,13 +73,17 @@ pub struct DaemonArgs {
     #[arg(long = "max-clients")]
     pub max_clients: Option<usize>,
 
-    /// Number of USB read workers per device
+    /// (deprecated; ordering requires exactly one USB reader)
     #[arg(long = "read-workers")]
     pub read_workers: Option<usize>,
 
-    /// Allowlist of UIDs (empty = allow all). Comma-separated.
+    /// Allowlist of UIDs, unix only (empty = allow all). Comma-separated.
     #[arg(long = "allow-uid", value_delimiter = ',')]
     pub allow_uids: Vec<u32>,
+
+    /// Allowlist of Windows user/group SIDs (empty = allow all). Comma-separated.
+    #[arg(long = "allow-sid", value_delimiter = ',')]
+    pub allow_sids: Vec<String>,
 
     /// Log output format: text or json
     #[arg(long = "log-format", default_value = "text")]
@@ -96,9 +109,11 @@ impl std::fmt::Display for LogFormat {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct ConfigFile {
+    pub endpoint: Option<String>,
     pub socket_path: Option<PathBuf>,
     pub socket_mode: Option<String>,
     pub socket_group: Option<String>,
+    pub pipe_security: Option<String>,
     pub lockdown_dir: Option<PathBuf>,
     pub require_pair_record: Option<bool>,
     pub scan_interval_ms: Option<u64>,
@@ -107,15 +122,18 @@ pub struct ConfigFile {
     pub max_clients: Option<usize>,
     pub read_workers: Option<usize>,
     pub allowed_uids: Option<Vec<u32>>,
+    pub allowed_sids: Option<Vec<String>>,
     pub log_format: Option<LogFormat>,
 }
 
 impl Default for ConfigFile {
     fn default() -> Self {
         Self {
+            endpoint: None,
             socket_path: None,
             socket_mode: None,
             socket_group: None,
+            pipe_security: None,
             lockdown_dir: None,
             require_pair_record: None,
             scan_interval_ms: None,
@@ -124,6 +142,7 @@ impl Default for ConfigFile {
             max_clients: None,
             read_workers: None,
             allowed_uids: None,
+            allowed_sids: None,
             log_format: None,
         }
     }
@@ -131,9 +150,16 @@ impl Default for ConfigFile {
 
 #[derive(Debug, Clone)]
 pub struct DaemonConfig {
+    /// Primary endpoint the daemon listens on.
+    pub endpoint: Endpoint,
+    /// Unparsed endpoint string, kept for `--print` and diagnostics.
+    pub endpoint_raw: Option<String>,
+    /// Unix socket path (mirror of `endpoint` when it is a unix socket; kept
+    /// for status printing and socket cleanup).
     pub socket_path: PathBuf,
     pub socket_mode: u32,
     pub socket_group: Option<String>,
+    pub pipe_security: String,
     pub lockdown_dir: PathBuf,
     pub require_pair_record: bool,
     pub scan_interval: Duration,
@@ -149,16 +175,21 @@ pub struct DaemonConfig {
     pub max_data_channel: usize,
     pub connect_channel: usize,
     pub allowed_uids: Vec<u32>,
+    pub allowed_sids: Vec<String>,
     pub log_format: LogFormat,
 }
 
 impl Default for DaemonConfig {
     fn default() -> Self {
         Self {
-            socket_path: PathBuf::from(DEFAULT_SOCKET_PATH),
+            endpoint: Endpoint::parse(&platform::default_endpoint())
+                .expect("built-in default endpoint must parse"),
+            endpoint_raw: None,
+            socket_path: PathBuf::from(platform::default_endpoint()),
             socket_mode: DEFAULT_SOCKET_MODE,
             socket_group: None,
-            lockdown_dir: PathBuf::from(DEFAULT_LOCKDOWN_DIR),
+            pipe_security: platform::default_pipe_security(),
+            lockdown_dir: platform::default_lockdown_dir(),
             require_pair_record: true,
             scan_interval: Duration::from_millis(DEFAULT_SCAN_INTERVAL_MS),
             usb_timeout: Duration::from_millis(DEFAULT_USB_TIMEOUT_MS),
@@ -173,6 +204,7 @@ impl Default for DaemonConfig {
             max_data_channel: DEFAULT_MAX_DATA_CHANNEL,
             connect_channel: DEFAULT_CONNECT_CHANNEL,
             allowed_uids: Vec::new(),
+            allowed_sids: Vec::new(),
             log_format: LogFormat::Text,
         }
     }
@@ -182,9 +214,15 @@ impl DaemonConfig {
     pub fn from_sources(config_path: Option<&std::path::Path>, args: &DaemonArgs) -> Result<Self, String> {
         let mut cfg = Self::default();
 
-        // Layer 1: TOML config file
-        if let Some(path) = config_path {
-            let content = std::fs::read_to_string(path)
+        // Layer 1: TOML config file (explicit path, else platform default if it exists)
+        let path = config_path
+            .map(|p| p.to_path_buf())
+            .or_else(|| {
+                let d = platform::default_config_path();
+                if d.exists() { Some(d) } else { None }
+            });
+        if let Some(path) = path {
+            let content = std::fs::read_to_string(&path)
                 .map_err(|e| format!("failed to read config file {}: {e}", path.display()))?;
             if content.len() > MAX_CONFIG_FILE_SIZE {
                 return Err(format!("config file too large: {} bytes (max {})", content.len(), MAX_CONFIG_FILE_SIZE));
@@ -197,12 +235,17 @@ impl DaemonConfig {
         // Layer 2: CLI arguments (override file)
         cfg.merge_args(args);
 
+        cfg.finalize_endpoint()?;
         Ok(cfg)
     }
 
     fn merge_file(&mut self, file: &ConfigFile) {
+        if let Some(ref e) = file.endpoint {
+            self.endpoint_raw = Some(e.clone());
+        }
         if let Some(ref p) = file.socket_path {
             self.socket_path = p.clone();
+            self.endpoint_raw = Some(format!("unix:{}", p.display()));
         }
         if let Some(ref m) = file.socket_mode {
             match parse_octal(m) {
@@ -212,6 +255,9 @@ impl DaemonConfig {
         }
         if let Some(ref g) = file.socket_group {
             self.socket_group = Some(g.clone());
+        }
+        if let Some(ref s) = file.pipe_security {
+            self.pipe_security = s.clone();
         }
         if let Some(ref p) = file.lockdown_dir {
             self.lockdown_dir = p.clone();
@@ -237,14 +283,21 @@ impl DaemonConfig {
         if let Some(ref uids) = file.allowed_uids {
             self.allowed_uids = uids.clone();
         }
+        if let Some(ref sids) = file.allowed_sids {
+            self.allowed_sids = sids.clone();
+        }
         if let Some(f) = file.log_format {
             self.log_format = f;
         }
     }
 
     fn merge_args(&mut self, args: &DaemonArgs) {
+        if let Some(ref e) = args.endpoint {
+            self.endpoint_raw = Some(e.clone());
+        }
         if let Some(ref p) = args.socket_path {
             self.socket_path = p.clone();
+            self.endpoint_raw = Some(format!("unix:{}", p.display()));
         }
         if let Some(ref m) = args.socket_mode {
             match parse_octal(m) {
@@ -254,6 +307,9 @@ impl DaemonConfig {
         }
         if let Some(ref g) = args.socket_group {
             self.socket_group = Some(g.clone());
+        }
+        if let Some(ref s) = args.pipe_security {
+            self.pipe_security = s.clone();
         }
         if let Some(ref p) = args.lockdown_dir {
             self.lockdown_dir = p.clone();
@@ -279,7 +335,21 @@ impl DaemonConfig {
         if !args.allow_uids.is_empty() {
             self.allowed_uids = args.allow_uids.clone();
         }
+        if !args.allow_sids.is_empty() {
+            self.allowed_sids = args.allow_sids.clone();
+        }
         self.log_format = args.log_format;
+    }
+
+    /// Resolve the endpoint_raw string into the typed `endpoint` field.
+    fn finalize_endpoint(&mut self) -> Result<(), String> {
+        if let Some(ref raw) = self.endpoint_raw {
+            self.endpoint = Endpoint::parse(raw)?;
+            if let Endpoint::Unix(ref p) = self.endpoint {
+                self.socket_path = p.clone();
+            }
+        }
+        Ok(())
     }
 
     pub fn validate(&self) -> Result<(), String> {
@@ -307,33 +377,29 @@ impl DaemonConfig {
         if self.socket_mode > 0o777 {
             return Err(format!("invalid socket mode: {:o}", self.socket_mode));
         }
-        if self.socket_mode & 0o002 != 0 {
+        if self.socket_mode & 0o002 != 0 && matches!(self.endpoint, Endpoint::Unix(_)) {
             warn!(
                 "socket mode {:o} is world-writable — consider restricting for production",
                 self.socket_mode
             );
         }
-        if self.socket_mode & 0o004 != 0 {
+        if self.socket_mode & 0o004 != 0 && matches!(self.endpoint, Endpoint::Unix(_)) {
             warn!(
                 "socket mode {:o} is world-readable — consider restricting for production",
                 self.socket_mode
             );
         }
-        if self.require_pair_record && self.lockdown_dir == PathBuf::from(DEFAULT_LOCKDOWN_DIR) {
-            // Validate lockdown dir exists when pair records are required
-            if !std::path::Path::new(&self.lockdown_dir).exists() {
-                warn!(
-                    "lockdown directory {} does not exist — pair record enforcement may fail",
-                    self.lockdown_dir.display()
-                );
-            }
+        if self.require_pair_record && !self.lockdown_dir.exists() {
+            warn!(
+                "lockdown directory {} does not exist — pair record enforcement may fail",
+                self.lockdown_dir.display()
+            );
         }
         Ok(())
     }
 
     pub fn resolve_group_gid(&self) -> Option<u32> {
         let group_name = self.socket_group.as_ref()?;
-        // Read /etc/group to find GID
         if let Ok(content) = std::fs::read_to_string("/etc/group") {
             for line in content.lines() {
                 let parts: Vec<&str> = line.split(':').collect();
@@ -370,12 +436,20 @@ mod tests {
     #[test]
     fn test_defaults() {
         let cfg = DaemonConfig::default();
-        assert_eq!(cfg.socket_path, PathBuf::from(DEFAULT_SOCKET_PATH));
         assert_eq!(cfg.socket_mode, 0o666);
         assert!(cfg.require_pair_record);
         assert_eq!(cfg.max_clients, 256);
         assert_eq!(cfg.read_workers, 3);
         assert!(cfg.allowed_uids.is_empty());
+    }
+
+    #[test]
+    fn test_endpoint_unix_scheme() {
+        let mut cfg = DaemonConfig::default();
+        cfg.endpoint_raw = Some("unix:/tmp/foo.sock".into());
+        cfg.finalize_endpoint().unwrap();
+        assert!(matches!(cfg.endpoint, Endpoint::Unix(_)));
+        assert_eq!(cfg.socket_path, PathBuf::from("/tmp/foo.sock"));
     }
 
     #[test]

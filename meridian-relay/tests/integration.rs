@@ -1,5 +1,5 @@
-//! End-to-end tests: spawn the real daemon on a temp socket and speak the
-//! usbmuxd client protocol to it. No USB hardware required.
+//! End-to-end tests: spawn the real daemon on an OS-appropriate endpoint and
+//! speak the usbmuxd client protocol to it. No USB hardware required.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -7,50 +7,70 @@ use std::time::Duration;
 use meridian_relay::config::DaemonConfig;
 use meridian_relay::daemon::{self, protocol};
 use meridian_relay::daemon::protocol::RawPacket;
+use meridian_relay::daemon::transport::Endpoint;
 use meridian_relay::metrics::Metrics;
 
 const TEST_UDID: &str = "00008110-000C694914F3801E";
 const TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Per-OS test endpoint: unix socket on unix, uniquely-named pipe on windows.
+fn test_endpoint(dir: &std::path::Path, name: &str) -> (String, Endpoint) {
+    let _ = dir; // used on unix only
+    #[cfg(unix)]
+    {
+        let p = dir.join(format!("{name}.sock"));
+        let s = format!("unix:{}", p.display());
+        (s.clone(), Endpoint::parse(&s).unwrap())
+    }
+    #[cfg(windows)]
+    {
+        let uniq = format!("meridian-test-{}-{}", name, std::process::id());
+        let s = format!("pipe:{uniq}");
+        (s.clone(), Endpoint::parse(&s).unwrap())
+    }
+}
+
 struct TestDaemon {
-    socket_path: std::path::PathBuf,
+    endpoint: Endpoint,
     lockdown_dir: std::path::PathBuf,
     handle: tokio::task::JoinHandle<()>,
-    // Keep the tempdir alive for the duration of the test.
+    // Keep the tempdir alive for the duration of the test (unix socket lives in it).
     _dir: tempfile::TempDir,
 }
 
 impl TestDaemon {
     async fn start() -> Self {
         let dir = tempfile::tempdir().expect("tempdir");
-        let socket_path = dir.path().join("test-daemon.sock");
         let lockdown_dir = dir.path().join("lockdown");
+        let id = TEST_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let (_, endpoint) = test_endpoint(dir.path(), &format!("daemon{id}"));
 
         let mut config = DaemonConfig::default();
-        config.socket_path = socket_path.clone();
+        config.endpoint = endpoint.clone();
+        config.endpoint_raw = Some(endpoint.display_string());
         config.lockdown_dir = lockdown_dir.clone();
 
         let metrics = Arc::new(Metrics::new());
+        // In tests the daemon never receives a shutdown signal.
         let handle = tokio::spawn(async move {
-            let _ = daemon::run_daemon(config, metrics).await;
+            let _ = daemon::run_daemon(config, metrics, std::future::pending()).await;
         });
 
-        // Wait until the socket is accepting connections.
+        // Wait until the endpoint is accepting connections.
         let deadline = std::time::Instant::now() + TIMEOUT;
         loop {
-            if tokio::net::UnixStream::connect(&socket_path).await.is_ok() {
+            if endpoint.connect().await.is_ok() {
                 break;
             }
-            assert!(std::time::Instant::now() < deadline, "daemon socket never appeared");
+            assert!(std::time::Instant::now() < deadline, "daemon endpoint never came up");
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
 
-        Self { socket_path, lockdown_dir, handle, _dir: dir }
+        Self { endpoint, lockdown_dir, handle, _dir: dir }
     }
 
     async fn rpc(&self, plist: plist::Dictionary, tag: u32) -> plist::Dictionary {
-        let stream = tokio::net::UnixStream::connect(&self.socket_path).await.expect("connect");
-        let mut stream = stream;
+        let mut stream = self.endpoint.connect().await.expect("connect");
         let pkt = RawPacket::new(plist, protocol::XML_PLIST_VERSION, protocol::PLIST_MESSAGE_TYPE, tag);
         protocol::write_packet(&mut stream, &pkt).await.expect("write");
         let resp = tokio::time::timeout(TIMEOUT, protocol::read_packet(&mut stream, 16 * 1024 * 1024))
@@ -61,6 +81,8 @@ impl TestDaemon {
         resp.plist
     }
 }
+
+static TEST_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 impl Drop for TestDaemon {
     fn drop(&mut self) {
@@ -117,7 +139,7 @@ async fn connect_to_nonexistent_device_is_bad_device() {
     let d = TestDaemon::start().await;
     let mut p = msg("Connect");
     p.insert("DeviceID".into(), plist::Value::Integer(99.into()));
-    p.insert("PortNumber".into(), plist::Value::Integer(62078u16.to_be() .into()));
+    p.insert("PortNumber".into(), plist::Value::Integer((62078u16.to_be()).into()));
     let resp = d.rpc(p, 1).await;
     assert_eq!(
         resp.get("Number").and_then(|v| v.as_unsigned_integer()),
@@ -137,7 +159,7 @@ async fn pair_record_crud_roundtrip() {
     let resp = d.rpc(p, 1).await;
     assert_eq!(resp.get("Number").and_then(|v| v.as_unsigned_integer()), Some(0), "save failed: {resp:?}");
 
-    // File exists on disk with 0600 perms.
+    // File exists on disk with restricted permissions.
     let file = d.lockdown_dir.join(format!("{TEST_UDID}.plist"));
     assert!(file.exists());
     #[cfg(unix)]
@@ -211,8 +233,7 @@ async fn read_buid_is_stable_and_protected() {
 #[tokio::test]
 async fn oversized_packet_rejected() {
     let d = TestDaemon::start().await;
-    let stream = tokio::net::UnixStream::connect(&d.socket_path).await.expect("connect");
-    let mut stream = stream;
+    let mut stream = d.endpoint.connect().await.expect("connect");
 
     // Header claims a body far beyond the daemon's max_packet_bytes.
     use tokio::io::AsyncWriteExt;
@@ -240,10 +261,9 @@ async fn concurrent_clients_served() {
     let d = TestDaemon::start().await;
     let mut handles = Vec::new();
     for i in 0..10 {
-        let socket_path = d.socket_path.clone();
+        let endpoint = d.endpoint.clone();
         handles.push(tokio::spawn(async move {
-            let stream = tokio::net::UnixStream::connect(&socket_path).await.expect("connect");
-            let mut stream = stream;
+            let mut stream = endpoint.connect().await.expect("connect");
             let pkt = RawPacket::new(msg("ListDevices"), 1, 8, i);
             protocol::write_packet(&mut stream, &pkt).await.expect("write");
             let resp = tokio::time::timeout(TIMEOUT, protocol::read_packet(&mut stream, 16 * 1024 * 1024))

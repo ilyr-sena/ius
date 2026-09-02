@@ -1,6 +1,5 @@
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::UnixStream;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 use tokio::fs as tokio_fs;
@@ -9,9 +8,11 @@ use super::device_scanner::{DeviceScanner, DeviceChange};
 use super::device_manager::{DeviceManager, MuxOutMsg};
 use super::mux::{ConnState, ConnectionManager};
 use super::protocol::{self, result, RawPacket};
+use super::transport::TransportStream;
 use crate::config::DaemonConfig;
 use crate::metrics::Metrics;
-use crate::security::{validate_udid, sanitize_udid_for_path, PeerCredentials};
+use crate::platform::{self, PeerIdentity};
+use crate::security::{validate_udid, sanitize_udid_for_path};
 
 pub const LOCKDOWN_PORT: u16 = 62078;
 
@@ -19,27 +20,31 @@ pub const LOCKDOWN_PORT: u16 = 62078;
 const MAX_PAIR_RECORD_BYTES: usize = 4 * 1024 * 1024;
 
 pub async fn handle_client(
-    mut stream: UnixStream,
+    mut stream: TransportStream,
     scanner: Arc<tokio::sync::RwLock<DeviceScanner>>,
     event_tx: tokio::sync::broadcast::Sender<DeviceChange>,
     device_manager: Arc<DeviceManager>,
     metrics: Arc<Metrics>,
     config: DaemonConfig,
-    peer: Option<PeerCredentials>,
+    peer: PeerIdentity,
 ) {
     metrics.clients_accepted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     metrics.clients_active.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-    let uid_str = peer.as_ref().map(|p| format!("uid={} pid={:?}", p.uid, p.pid)).unwrap_or_default();
-    debug!("client connected{uid_str}");
+    let id_str = match (&peer.credentials, &peer.sid) {
+        (Some(c), _) => format!(" uid={} pid={:?}", c.uid, c.pid),
+        (None, Some(sid)) => format!(" sid={sid}"),
+        (None, None) => String::new(),
+    };
+    debug!("client connected{id_str}");
 
-    if let Some(ref p) = peer {
-        if !p.is_allowed(&config.allowed_uids) {
-            warn!("rejecting client: uid={} not in allowlist", p.uid);
-            metrics.clients_rejected.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            metrics.clients_active.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-            return;
-        }
+    // Peer auth: unix allowlists use UIDs; windows uses SIDs. No identity
+    // (loopback TCP) passes only when the relevant allowlist is empty.
+    if !peer_is_allowed(&peer, &config) {
+        warn!("rejecting client: not in allowlist");
+        metrics.clients_rejected.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        metrics.clients_active.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        return;
     }
 
     let result = handle_client_inner(&mut stream, scanner, event_tx, device_manager, &metrics, &config).await;
@@ -51,8 +56,33 @@ pub async fn handle_client(
     }
 }
 
+fn peer_is_allowed(peer: &PeerIdentity, config: &DaemonConfig) -> bool {
+    // UID check (unix). Empty allowlist = allow all. A missing credential
+    // when an allowlist exists is a denial (fail-closed).
+    if !config.allowed_uids.is_empty() {
+        return match &peer.credentials {
+            Some(creds) => config.allowed_uids.contains(&creds.uid),
+            None => {
+                warn!("peer identity unavailable but UID allowlist is set — denying");
+                false
+            }
+        };
+    }
+    // SID check (windows). Empty allowlist = allow all; same fail-closed rule.
+    if !config.allowed_sids.is_empty() {
+        return match &peer.sid {
+            Some(sid) => config.allowed_sids.iter().any(|s| s == sid),
+            None => {
+                warn!("peer SID unavailable but SID allowlist is set — denying");
+                false
+            }
+        };
+    }
+    true
+}
+
 async fn handle_client_inner(
-    stream: &mut UnixStream,
+    stream: &mut TransportStream,
     scanner: Arc<tokio::sync::RwLock<DeviceScanner>>,
     event_tx: tokio::sync::broadcast::Sender<DeviceChange>,
     device_manager: Arc<DeviceManager>,
@@ -471,29 +501,9 @@ async fn save_pair_record(udid: &str, data: &[u8], lockdown_dir: &std::path::Pat
 
     let plist_path = lockdown_dir.join(format!("{safe_name}.plist"));
 
-    // Hardened write: refuse to follow symlinks (pair records are sensitive),
-    // and create the file with 0600 permissions atomically.
-    #[cfg(unix)]
-    {
-        use tokio::io::AsyncWriteExt;
-
-        let mut file = tokio_fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW)
-            .open(&plist_path)
-            .await?;
-        file.write_all(data).await?;
-        file.sync_all().await?;
-    }
-    #[cfg(not(unix))]
-    {
-        tokio_fs::write(&plist_path, data).await?;
-    }
-
-    Ok(())
+    // Hardened write per platform: O_NOFOLLOW+0600 on unix,
+    // symlink-refusal + SYSTEM/BA DACL on windows.
+    platform::secure_write_secret(&plist_path, data).await
 }
 
 async fn delete_pair_record(udid: &str, lockdown_dir: &std::path::Path) -> Result<(), std::io::Error> {
@@ -536,46 +546,20 @@ async fn get_or_create_buid(lockdown_dir: &std::path::Path) -> String {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos() as u64,
-        rand_u64().await,
+        platform::random_u64().await,
     );
 
     if tokio_fs::metadata(lockdown_dir).await.is_err() {
         let _ = tokio_fs::create_dir_all(lockdown_dir).await;
     }
-    let _ = tokio_fs::write(&buid_path, &buid).await;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = tokio_fs::set_permissions(&buid_path, std::fs::Permissions::from_mode(0o600)).await;
-    }
+    // BUID is a secret: write it with full platform protections.
+    let _ = platform::secure_write_secret(&buid_path, buid.as_bytes()).await;
 
     buid
 }
 
-async fn rand_u64() -> u64 {
-    let mut buf = [0u8; 8];
-    if let Ok(mut f) = tokio_fs::File::open("/dev/urandom").await {
-        use tokio::io::AsyncReadExt;
-        let _ = f.read_exact(&mut buf).await;
-    } else {
-        use std::hash::{BuildHasher, Hasher};
-        let s = std::collections::hash_map::RandomState::new();
-        let mut h = s.build_hasher();
-        h.write_u64(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos() as u64,
-        );
-        let stack_addr = &h as *const _ as u64;
-        h.write_u64(stack_addr);
-        return h.finish();
-    }
-    u64::from_ne_bytes(buf)
-}
-
 async fn proxy_connection(
-    stream: &mut UnixStream,
+    stream: &mut TransportStream,
     conn_mgr: &ConnectionManager,
     device_id: u32,
     sport: u16,
@@ -604,7 +588,7 @@ async fn proxy_connection(
 }
 
 async fn proxy_loop(
-    stream: &mut UnixStream,
+    stream: &mut TransportStream,
     conn_mgr: &ConnectionManager,
     device_id: u32,
     sport: u16,
@@ -676,6 +660,36 @@ async fn proxy_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_peer_allowlist_uid() {
+        let mut config = crate::config::DaemonConfig::default();
+        let ident = |uid| crate::platform::PeerIdentity {
+            credentials: Some(crate::security::PeerCredentials { uid, gid: uid, pid: None }),
+            sid: None,
+        };
+        // Empty allowlist → allow everyone.
+        assert!(peer_is_allowed(&ident(1234), &config));
+
+        config.allowed_uids = vec![1000];
+        assert!(peer_is_allowed(&ident(1000), &config));
+        assert!(!peer_is_allowed(&ident(1001), &config));
+        // Fail-closed: no identity + configured allowlist → deny.
+        assert!(!peer_is_allowed(&crate::platform::PeerIdentity::anonymous(), &config));
+    }
+
+    #[test]
+    fn test_peer_allowlist_sid() {
+        let mut config = crate::config::DaemonConfig::default();
+        config.allowed_sids = vec!["S-1-5-32-545".into()];
+        let ident = |sid: &str| crate::platform::PeerIdentity {
+            credentials: None,
+            sid: Some(sid.into()),
+        };
+        assert!(peer_is_allowed(&ident("S-1-5-32-545"), &config));
+        assert!(!peer_is_allowed(&ident("S-1-5-18"), &config));
+        assert!(!peer_is_allowed(&crate::platform::PeerIdentity::anonymous(), &config));
+    }
 
     #[test]
     fn test_validate_udid() {

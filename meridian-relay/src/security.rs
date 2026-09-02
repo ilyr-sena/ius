@@ -61,32 +61,28 @@ pub struct PeerCredentials {
 }
 
 impl PeerCredentials {
-    /// Extract peer credentials from a tokio UnixStream.
+    /// Extract peer credentials from a tokio UnixStream (unix only).
+    #[cfg(unix)]
     pub fn from_unix_stream(stream: &tokio::net::UnixStream) -> Option<Self> {
-        // tokio::net::UnixStream doesn't have peer_cred() on all platforms.
-        // Use std library for Linux.
-        #[cfg(unix)]
-        {
-            use std::os::unix::io::AsRawFd;
-            let fd = stream.as_raw_fd();
-            let mut cred = libc::ucred { pid: 0, uid: 0, gid: 0 };
-            let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
-            let ret = unsafe {
-                libc::getsockopt(
-                    fd,
-                    libc::SOL_SOCKET,
-                    libc::SO_PEERCRED,
-                    &mut cred as *mut _ as *mut libc::c_void,
-                    &mut len,
-                )
-            };
-            if ret == 0 {
-                return Some(PeerCredentials {
-                    uid: cred.uid,
-                    gid: cred.gid,
-                    pid: if cred.pid > 0 { Some(cred.pid as u32) } else { None },
-                });
-            }
+        use std::os::unix::io::AsRawFd;
+        let fd = stream.as_raw_fd();
+        let mut cred = libc::ucred { pid: 0, uid: 0, gid: 0 };
+        let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+        let ret = unsafe {
+            libc::getsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_PEERCRED,
+                &mut cred as *mut _ as *mut libc::c_void,
+                &mut len,
+            )
+        };
+        if ret == 0 {
+            return Some(PeerCredentials {
+                uid: cred.uid,
+                gid: cred.gid,
+                pid: if cred.pid > 0 { Some(cred.pid as u32) } else { None },
+            });
         }
         None
     }

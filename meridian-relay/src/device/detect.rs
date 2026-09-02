@@ -1,24 +1,26 @@
-use tokio::net::UnixStream;
 use tracing::{debug, info};
 
 use crate::daemon::protocol::{self, RawPacket, PLIST_MESSAGE_TYPE, XML_PLIST_VERSION};
+use crate::daemon::transport::Endpoint;
 use crate::device::{ConnectionType, Device};
-use crate::config::DEFAULT_SOCKET_PATH;
+use crate::platform;
 
 /// Maximum plist response accepted from the daemon (16 MiB, matches server cap).
 const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 
 pub async fn list_devices() -> Result<Vec<Device>, Box<dyn std::error::Error>> {
-    list_devices_from(DEFAULT_SOCKET_PATH).await
+    list_devices_from(&platform::default_endpoint()).await
 }
 
-pub async fn list_devices_from(socket_path: &str) -> Result<Vec<Device>, Box<dyn std::error::Error>> {
-    let socket_path = std::env::var("USBMUXD_SOCKET_ADDRESS")
-        .unwrap_or_else(|_| socket_path.to_string());
+pub async fn list_devices_from(endpoint_str: &str) -> Result<Vec<Device>, Box<dyn std::error::Error>> {
+    // Back-compat: USBMUXD_SOCKET_ADDRESS may hold a bare path or full endpoint.
+    let endpoint_str = std::env::var("USBMUXD_SOCKET_ADDRESS")
+        .unwrap_or_else(|_| endpoint_str.to_string());
 
-    debug!("connecting to usbmuxd at {socket_path}");
+    debug!("connecting to usbmuxd at {endpoint_str}");
 
-    let mut stream = UnixStream::connect(&socket_path).await?;
+    let endpoint = Endpoint::parse(&endpoint_str)?;
+    let mut stream = endpoint.connect().await?;
 
     let mut plist = plist::Dictionary::new();
     plist.insert("ClientVersion".into(), plist::Value::Integer(1.into()));

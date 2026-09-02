@@ -1,15 +1,15 @@
 use std::time::Duration;
-use tokio::net::UnixStream;
 use tracing::{debug, info, warn};
 
 use crate::daemon::protocol::{self, RawPacket, PLIST_MESSAGE_TYPE, XML_PLIST_VERSION};
-use crate::config::DEFAULT_SOCKET_PATH;
+use crate::daemon::transport::Endpoint;
+use crate::platform;
 
 /// Maximum plist event frame accepted from the daemon.
 const MAX_EVENT_BYTES: usize = 16 * 1024 * 1024;
 
 pub async fn watch_devices() -> Result<(), Box<dyn std::error::Error>> {
-    watch_devices_from(DEFAULT_SOCKET_PATH, None).await
+    watch_devices_from(&platform::default_endpoint(), None).await
 }
 
 /// Watch device attach/detach events from the daemon socket.
@@ -40,10 +40,11 @@ pub async fn watch_devices_from(socket_path: &str, udid_filter: Option<&str>) ->
     }
 }
 
-async fn try_connect_and_listen(socket_path: &str, udid_filter: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
-    debug!("connecting to usbmuxd at {socket_path}");
+async fn try_connect_and_listen(endpoint_str: &str, udid_filter: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+    debug!("connecting to usbmuxd at {endpoint_str}");
 
-    let mut stream = UnixStream::connect(socket_path).await?;
+    let endpoint = Endpoint::parse(endpoint_str)?;
+    let mut stream = endpoint.connect().await?;
 
     let mut plist = plist::Dictionary::new();
     plist.insert("ClientVersion".into(), plist::Value::Integer(1.into()));

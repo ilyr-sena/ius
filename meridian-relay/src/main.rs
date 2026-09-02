@@ -1,25 +1,30 @@
 use clap::{Parser, Subcommand};
 use tracing_subscriber::{fmt, EnvFilter};
 use std::sync::Arc;
-use std::path::PathBuf;
 
-use meridian_relay::config::{DaemonConfig, DaemonArgs, LogFormat, DEFAULT_SOCKET_PATH};
+use meridian_relay::config::{DaemonConfig, DaemonArgs, LogFormat};
 use meridian_relay::metrics::Metrics;
-use meridian_relay::daemon;
+use meridian_relay::daemon::{self, transport::Endpoint};
 use meridian_relay::device;
-use meridian_relay::device::detect::list_devices;
 use meridian_relay::device::info::enrich_device_info;
 use meridian_relay::device::monitor::watch_devices_from;
+use meridian_relay::platform;
 
 #[derive(Parser)]
 #[command(name = "meridian-relay")]
-#[command(version, about = "Meridian — USB mux relay daemon")]
+#[command(version, about = "Meridian — cross-platform USB mux relay daemon (iOS / usbmuxd-compatible)")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
 
+    /// Daemon endpoint (unix:/path, pipe:name, tcp:127.0.0.1:port). Global flag;
+    /// for client commands it selects where the daemon is reached.
     #[arg(short, long, global = true)]
-    socket_path: Option<PathBuf>,
+    endpoint: Option<String>,
+
+    /// [back-compat] unix socket path — same as `--endpoint unix:PATH`.
+    #[arg(long, global = true)]
+    socket_path: Option<std::path::PathBuf>,
 
     #[arg(long, global = true, default_value = "pretty")]
     log_format: String,
@@ -48,19 +53,52 @@ enum Commands {
     Daemon {
         #[arg(long, default_value = "false")]
         print: bool,
+
+        /// Run under the Service Control Manager (windows only; set by the
+        /// installed service itself, not meant for interactive use).
+        #[cfg(windows)]
+        #[arg(long, default_value = "false", hide = true)]
+        service_run: bool,
     },
     Stats {
         #[arg(short, long)]
         count: Option<u32>,
     },
+    /// Manage the Windows service installation (windows only).
+    #[cfg(windows)]
+    Service {
+        #[command(subcommand)]
+        action: ServiceAction,
+    },
+}
+
+#[cfg(windows)]
+#[derive(Subcommand)]
+enum ServiceAction {
+    /// Install the SCM service (auto-start).
+    Install {
+        /// Path to the meridian-relay.exe image; defaults to current exe.
+        #[arg(long)]
+        bin_path: Option<std::path::PathBuf>,
+    },
+    /// Remove the SCM service.
+    Uninstall,
+}
+
+fn resolve_endpoint(cli: &Cli) -> Option<String> {
+    cli.endpoint.clone().or_else(|| {
+        cli.socket_path.as_ref().map(|p| format!("unix:{}", p.display()))
+    })
 }
 
 fn make_daemon_args(cli: &Cli) -> DaemonArgs {
     DaemonArgs {
         config_path: None,
+        endpoint: cli.endpoint.clone(),
         socket_path: cli.socket_path.clone(),
         socket_mode: None,
         socket_group: None,
+        pipe_security: None,
         lockdown_dir: None,
         no_require_pair_record: false,
         scan_interval_ms: None,
@@ -69,6 +107,7 @@ fn make_daemon_args(cli: &Cli) -> DaemonArgs {
         max_clients: None,
         read_workers: None,
         allow_uids: Vec::new(),
+        allow_sids: Vec::new(),
         log_format: match cli.log_format.as_str() {
             "json" => LogFormat::Json,
             _ => LogFormat::Text,
@@ -85,6 +124,12 @@ fn init_tracing(kind: &str) {
     }
 }
 
+/// The daemon needs an exit condition: on unix we react to SIGINT/SIGTERM,
+/// on windows to console signals (SCM stop is wired in the service module).
+fn shutdown_signal() -> impl std::future::Future<Output = ()> + Send {
+    platform::wait_for_shutdown_signal()
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
@@ -95,9 +140,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         init_tracing(&cli.log_format);
     }
 
+    // Resolve the endpoint once, before `cli.command` is moved by the match.
+    let endpoint = resolve_endpoint(&cli).unwrap_or_else(platform::default_endpoint);
+
     match cli.command {
         Commands::List { format, json, hide_sensitive } => {
-            let devices = list_devices().await?;
+            let devices = list_devices_from_str(&endpoint).await?;
             if devices.is_empty() {
                 println!("no devices found");
                 return Ok(());
@@ -127,7 +175,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         Commands::Info { udid, no_color } => {
-            let devices = list_devices().await?;
+            let devices = list_devices_from_str(&endpoint).await?;
             if devices.is_empty() {
                 eprintln!("no devices found");
                 std::process::exit(1);
@@ -155,68 +203,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("press ctrl-c to stop");
             println!();
 
-            watch_devices_from(DEFAULT_SOCKET_PATH, udid.as_deref()).await?;
+            watch_devices_from(&endpoint, udid.as_deref()).await?;
         }
 
-        Commands::Daemon { print } => {
-            let args = make_daemon_args(&cli);
-            let config = DaemonConfig::from_sources(args.config_path.as_deref(), &args)
-                .map_err(std::io::Error::other)?;
+        #[cfg(not(windows))]
+        Commands::Daemon { print, .. } => {
+            return run_daemon_entry(&cli, print).await;
+        }
 
-            // Initialize logging per the merged daemon config.
-            init_tracing(match config.log_format {
-                LogFormat::Json => "json",
-                LogFormat::Text => "pretty",
-            });
-
-            config.validate().map_err(std::io::Error::other)?;
-
-            if print {
-                println!("socket_path = {:?}", config.socket_path);
-                println!("socket_mode = {:o}", config.socket_mode);
-                println!("lockdown_dir = {:?}", config.lockdown_dir);
-                println!("require_pair_record = {}", config.require_pair_record);
-                println!("scan_interval = {:?}", config.scan_interval);
-                println!("usb_timeout = {:?}", config.usb_timeout);
-                println!("connect_timeout = {:?}", config.connect_timeout);
-                println!("max_clients = {}", config.max_clients);
-                println!("read_workers = {}", config.read_workers);
-                println!("max_reassembly_bytes = {}", config.max_reassembly_bytes);
-                println!("max_packet_bytes = {}", config.max_packet_bytes);
-                println!("max_conn_buffer = {}", config.max_conn_buffer);
-                println!("client_read_buf = {}", config.client_read_buf);
-                println!("max_data_channel = {}", config.max_data_channel);
-                println!("connect_channel = {}", config.connect_channel);
-                println!("allowed_uids = {:?}", config.allowed_uids);
-                println!("log_format = {}", config.log_format);
-                return Ok(());
+        #[cfg(windows)]
+        Commands::Daemon { print, service_run } => {
+            if service_run {
+                // Under SCM: dispatch to the service entry point, which runs
+                // the daemon inside the SCM-hosted runtime.
+                return meridian_relay::service::run_as_service()
+                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error>);
             }
-
-            let metrics = Arc::new(Metrics::new());
-            let metrics_log = metrics.clone();
-
-            tokio::spawn(async move {
-                loop {
-                    tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-                    let snapshot = metrics_log.snapshot();
-                    tracing::info!("metrics: {}", serde_json::to_string(&snapshot).unwrap_or_default());
-                }
-            });
-
-            daemon::run_daemon(config, metrics).await?;
+            return run_daemon_entry(&cli, print).await;
         }
 
         Commands::Stats { count } => {
-            let args = make_daemon_args(&cli);
-            let config = DaemonConfig::from_sources(args.config_path.as_deref(), &args)
-                .map_err(std::io::Error::other)?;
+            let endpoint = Endpoint::parse(&endpoint)?;
 
-            let socket_path = cli.socket_path.clone().unwrap_or(config.socket_path.clone());
+            println!("connecting to daemon at {}...", endpoint.display_string());
 
-            println!("connecting to daemon at {}...", socket_path.display());
-
-            let stream = tokio::net::UnixStream::connect(&socket_path).await?;
-            let mut stream = stream;
+            let mut stream = endpoint.connect().await?;
 
             let count = count.unwrap_or(1);
             for i in 0..count {
@@ -239,9 +250,83 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
+
+        #[cfg(windows)]
+        Commands::Service { action } => {
+            match action {
+                ServiceAction::Install { bin_path } => {
+                    let bin = match bin_path {
+                        Some(p) => p,
+                        None => std::env::current_exe()?,
+                    };
+                    meridian_relay::service::install_service(&bin)?;
+                    println!("service installed (Start=auto). Start with: sc.exe start meridian-relay");
+                }
+                ServiceAction::Uninstall => {
+                    meridian_relay::service::uninstall_service()?;
+                    println!("service uninstalled");
+                }
+            }
+        }
     }
 
     Ok(())
+}
+
+async fn list_devices_from_str(endpoint_str: &str) -> Result<Vec<meridian_relay::device::Device>, Box<dyn std::error::Error>> {
+    // Thin shim so CLI paths never need to know about USBMUXD_SOCKET_ADDRESS.
+    meridian_relay::device::detect::list_devices_from(endpoint_str).await
+}
+
+/// Daemon entry point shared by the OS-specific match arms.
+async fn run_daemon_entry(cli: &Cli, print: bool) -> Result<(), Box<dyn std::error::Error>> {
+    let args = make_daemon_args(cli);
+    let config = DaemonConfig::from_sources(args.config_path.as_deref(), &args)
+        .map_err(std::io::Error::other)?;
+
+    // Initialize logging per the merged daemon config.
+    init_tracing(match config.log_format {
+        LogFormat::Json => "json",
+        LogFormat::Text => "pretty",
+    });
+
+    config.validate().map_err(std::io::Error::other)?;
+
+    if print {
+        println!("endpoint = {}", config.endpoint.display_string());
+        println!("socket_mode = {:o}", config.socket_mode);
+        println!("pipe_security = {}", config.pipe_security);
+        println!("lockdown_dir = {:?}", config.lockdown_dir);
+        println!("require_pair_record = {}", config.require_pair_record);
+        println!("scan_interval = {:?}", config.scan_interval);
+        println!("usb_timeout = {:?}", config.usb_timeout);
+        println!("connect_timeout = {:?}", config.connect_timeout);
+        println!("max_clients = {}", config.max_clients);
+        println!("read_workers = {}", config.read_workers);
+        println!("max_reassembly_bytes = {}", config.max_reassembly_bytes);
+        println!("max_packet_bytes = {}", config.max_packet_bytes);
+        println!("max_conn_buffer = {}", config.max_conn_buffer);
+        println!("client_read_buf = {}", config.client_read_buf);
+        println!("max_data_channel = {}", config.max_data_channel);
+        println!("connect_channel = {}", config.connect_channel);
+        println!("allowed_uids = {:?}", config.allowed_uids);
+        println!("allowed_sids = {:?}", config.allowed_sids);
+        println!("log_format = {}", config.log_format);
+        return Ok(());
+    }
+
+    let metrics = Arc::new(Metrics::new());
+    let metrics_log = metrics.clone();
+
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            let snapshot = metrics_log.snapshot();
+            tracing::info!("metrics: {}", serde_json::to_string(&snapshot).unwrap_or_default());
+        }
+    });
+
+    daemon::run_daemon(config, metrics, shutdown_signal()).await
 }
 
 fn print_device_info(info: &device::Device, _no_color: bool) {

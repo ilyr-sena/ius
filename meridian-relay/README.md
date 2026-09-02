@@ -1,11 +1,22 @@
 # meridian-relay
 
 A Rust reimplementation of Apple's `usbmuxd` — a userspace daemon that
-multiplexes TCP connections to iOS devices (iPhone / iPad) over USB.
+multiplexes TCP-over-USB connections to iOS devices (iPhone / iPad).
 
-It speaks the usbmuxd client protocol on a Unix domain socket, so standard
-libimobiledevice tooling (`idevicepair`, `ideviceinfo`, ...) can talk to
-devices through it.
+It speaks the usbmuxd client protocol so standard libimobiledevice tooling
+(`idevicepair`, `ideviceinfo`, ...) can talk to devices through it.
+**One codebase builds for Linux and Windows.**
+
+| Platform | IPC endpoint | Usage |
+|---|---|---|
+| Linux/macOS | Unix socket `/var/run/usbmuxd` | `meridian-relay daemon` |
+| Windows | Named pipe `\\.\pipe\meridian-relay` | `meridian-relay.exe daemon` |
+| Any | Loopback TCP (opt-in) | `-e tcp:127.0.0.1:27015` |
+
+Specify endpoints as `unix:/path`, `pipe:name`, or `tcp:addr:port`
+(`--endpoint` flag or `endpoint = "..."` in the config file).
+`--socket-path` remains as a legacy alias for a unix endpoint.
+`USBMUXD_SOCKET_ADDRESS` still overrides for client commands.
 
 ## Features
 
@@ -26,8 +37,11 @@ devices through it.
 
 ## Requirements
 
-- Linux, Rust stable (edition 2024)
-- libusb-1.0 development files (`libusb-1.0-0-dev` / `libusbx-devel`)
+- Rust stable (edition 2024)
+- **Linux**: libusb-1.0 development files (`libusb-1.0-0-dev` / `libusbx-devel`)
+- **Windows**: no system dependencies (libusb is compiled statically via the
+  `vendored` feature); devices must be bound to WinUSB — see
+  [Windows setup](#windows-setup)
 - `ideviceinfo` (libimobiledevice) for device info enrichment
 
 ## Build & test
@@ -36,6 +50,13 @@ devices through it.
 cargo build --release
 cargo test
 cargo clippy --all-targets -- -D warnings
+```
+
+Cross-builds for Windows from Linux work with the gnu target:
+
+```sh
+rustup target add x86_64-pc-windows-gnu
+cargo build --release --target x86_64-pc-windows-gnu
 ```
 
 ## Usage
@@ -66,17 +87,20 @@ Every setting has a built-in default; a TOML file overrides defaults, CLI
 flags override the file.
 
 ```toml
-# /etc/meridian-relay.toml
-socket_path      = "/var/run/usbmuxd"
-socket_mode      = "0660"            # octal
-socket_group     = "usbmux"          # socket group ownership
-lockdown_dir     = "/var/lib/lockdown"
+# /etc/meridian-relay.toml            (Linux default path)
+# %ProgramData%\Meridian\config.toml  (Windows default path)
+endpoint         = "unix:/var/run/usbmuxd"   # "pipe:meridian-relay" on Windows
+socket_mode      = "0660"            # octal — unix sockets only
+socket_group     = "usbmux"          # socket group ownership — unix only
+pipe_security    = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;IU)"  # windows SDDL
+lockdown_dir     = "/var/lib/lockdown"  # %ProgramData%\Apple\Lockdown on Windows
 require_pair_record = true           # refuse lockdown connects without a pair record
 scan_interval_ms = 2000
 usb_timeout_ms   = 5000
 connect_timeout_ms = 5000
 max_clients      = 256
-allowed_uids     = [0, 1000]         # empty = allow all
+allowed_uids     = [0, 1000]         # unix peers; empty = allow all
+allowed_sids     = []                # windows SIDs; empty = allow all
 log_format       = "text"            # or "json"
 ```
 
@@ -102,23 +126,70 @@ sudo systemctl enable --now meridian-relay.service
 The service uses `Type=notify` (the daemon sends `READY=1` once bound) and
 sandboxing directives; see the unit file.
 
+## Windows setup
+
+Two one-time steps, both covered by the installer artifacts in `packaging/`:
+
+1. **WinUSB driver binding.** Windows can't talk raw USB to an iPhone until
+   the interface has a WinUSB function driver. Install
+   `packaging/meridian-relay-winusb.inf` (sign the catalog for production):
+
+   ```powershell
+   pnputil /add-driver .\packaging\meridian-relay-winusb.inf /install
+   ```
+
+   Note: while a device is WinUSB-bound, iTunes will not see it. Reassign
+   the driver to Apple's stack if you need iTunes for the same device.
+
+2. **Windows service.**
+
+   ```powershell
+   .\meridian-relay.exe service install
+   sc.exe start meridian-relay
+   ```
+
+   The daemon runs as LocalSystem, listens on `\\.\pipe\meridian-relay`,
+   and reports proper StartPending/Running/Stopped states to the SCM.
+
+   ```powershell
+   .\meridian-relay.exe service uninstall
+   ```
+
+### Windows-specific configuration
+
+| Setting | Purpose |
+|---|---|
+| `pipe_security` | SDDL DACL for the named pipe (default: SYSTEM + Admins + interactive users) |
+| `allowed_sids` | Allowlist of client user/group SIDs (empty = allow all) |
+| `lockdown_dir` | defaults to `%ProgramData%\Apple\Lockdown` (iTunes-compatible) |
+| config file | auto-discovered at `%ProgramData%\Meridian\config.toml` |
+
+`socket_mode`, `socket_group`, and `allowed_uids` are unix-only and ignored
+on Windows (`--pipe-security` + `--allow-sid` are their Windows equivalents).
+
 ## Layout
 
 ```
 src/
-  config.rs      layered, validated configuration
+  config.rs      layered, validated, cross-platform configuration
   metrics.rs     atomic counters + JSON snapshot
   security.rs    UDID validation, peer creds, RAII guards
+  platform/      ALL OS divergence lives here (unix.rs / windows.rs)
+  service.rs     Windows SCM integration (windows only)
   device/        client-side query/enrich/watch (CLI)
   daemon/
+    transport.rs       endpoint abstraction: unix socket / named pipe / TCP
     protocol.rs        usbmuxd socket framing + result codes
     device_scanner.rs  USB enumeration via libusb
     device_manager.rs  per-device async task, connect dispatch
     connection.rs      client command handling + proxy loop
     mux.rs             mux framing, TCP-over-USB stack, reassembler
     usb.rs             bulk endpoint I/O (single ordered reader)
-tests/integration.rs  end-to-end socket-level tests
+tests/integration.rs  end-to-end socket/pipe-level tests
 test_client.py        manual smoke test against a live device
+packaging/
+  meridian-relay.service     hardened systemd unit (Linux)
+  meridian-relay-winusb.inf  WinUSB driver binding (Windows)
 ```
 
 ## Test client
