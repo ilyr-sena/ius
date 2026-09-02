@@ -64,6 +64,13 @@ enum Commands {
         #[arg(short, long)]
         count: Option<u32>,
     },
+    /// One-command host provisioning: installs drivers/rules and the service.
+    /// Safe to re-run; idempotent.
+    Setup {
+        /// Only provision drivers/rules; skip installing the background service.
+        #[arg(long)]
+        skip_service: bool,
+    },
     /// Manage the Windows service installation (windows only).
     #[cfg(windows)]
     Service {
@@ -220,6 +227,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .map_err(|e| Box::new(e) as Box<dyn std::error::Error>);
             }
             return run_daemon_entry(&cli, print).await;
+        }
+
+        Commands::Setup { skip_service } => {
+            println!("provisioning meridian-relay on this host...");
+            match meridian_relay::setup::provision(!skip_service) {
+                Ok(lines) => {
+                    for line in lines {
+                        println!("  ✓ {line}");
+                    }
+                    println!("\nready — start the daemon with: meridian-relay daemon");
+                }
+                Err(e) => {
+                    eprintln!("setup failed: {e}");
+                    eprintln!("(hint: this command needs administrator/root privileges)");
+                    std::process::exit(1);
+                }
+            }
         }
 
         Commands::Stats { count } => {

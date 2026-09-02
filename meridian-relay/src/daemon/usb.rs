@@ -14,35 +14,30 @@ pub struct AppleMuxInterface {
 }
 
 impl AppleMuxInterface {
+    /// Apple mux interface USB class triple.
+    const MUX_CLASS: u8 = 255;
+    const MUX_SUBCLASS: u8 = 254;
+    const MUX_PROTOCOL: u8 = 2;
+
     pub fn open(device: &rusb::Device<rusb::GlobalContext>, io_timeout: std::time::Duration) -> Result<Self, MuxError> {
-        let handle: rusb::DeviceHandle<rusb::GlobalContext> = device.open().map_err(|e: rusb::Error| MuxError::UsbError(e.to_string()))?;
-        let config = device.active_config_descriptor()
+        let handle: rusb::DeviceHandle<rusb::GlobalContext> = device.open()
             .map_err(|e: rusb::Error| MuxError::UsbError(e.to_string()))?;
 
-        let mut interface_num = 0u8;
-        let mut read_ep = 0u8;
-        let mut write_ep = 0u8;
+        // Find the mux interface by its well-known class triple
+        // (class=255, subclass=254, protocol=2). Fall back to the first
+        // interface with a bulk IN/OUT pair for unknown oddities.
+        let (interface_num, read_ep, write_ep) = Self::find_mux_interface(device)
+            .map_err(|e| MuxError::UsbError(e))?;
 
-        for iface in config.interfaces() {
-            for desc in iface.descriptors() {
-                for ep in desc.endpoint_descriptors() {
-                    if ep.transfer_type() == rusb::TransferType::Bulk {
-                        match ep.direction() {
-                            rusb::Direction::In => {
-                                read_ep = ep.address();
-                                interface_num = iface.number() as u8;
-                            }
-                            rusb::Direction::Out => {
-                                write_ep = ep.address();
-                            }
-                        }
-                    }
+        // A kernel driver (e.g. a stale binding) may hold the interface — on
+        // unix, detach it so the claim succeeds.
+        #[cfg(unix)]
+        {
+            if let Ok(true) = handle.kernel_driver_active(interface_num) {
+                if let Err(e) = handle.detach_kernel_driver(interface_num) {
+                    tracing::warn!("detach kernel driver from iface {interface_num} failed: {e}");
                 }
             }
-        }
-
-        if read_ep == 0 || write_ep == 0 {
-            return Err(MuxError::UsbError("could not find mux endpoints".into()));
         }
 
         handle.claim_interface(interface_num)
@@ -55,6 +50,44 @@ impl AppleMuxInterface {
             write_endpoint: write_ep,
             io_timeout,
         })
+    }
+
+    /// Find the mux interface + its bulk IN/OUT endpoints.
+    fn find_mux_interface(device: &rusb::Device<rusb::GlobalContext>) -> Result<(u8, u8, u8), String> {
+        let config = device.active_config_descriptor()
+            .map_err(|e| e.to_string())?;
+
+        // Pass 1: exact Apple mux class triple.
+        let mut fallback = None;
+        for iface in config.interfaces() {
+            for desc in iface.descriptors() {
+                let is_mux = desc.class_code() == Self::MUX_CLASS
+                    && desc.sub_class_code() == Self::MUX_SUBCLASS
+                    && desc.protocol_code() == Self::MUX_PROTOCOL;
+
+                let mut read_ep = 0u8;
+                let mut write_ep = 0u8;
+                for ep in desc.endpoint_descriptors() {
+                    if ep.transfer_type() == rusb::TransferType::Bulk {
+                        match ep.direction() {
+                            rusb::Direction::In => read_ep = ep.address(),
+                            rusb::Direction::Out => write_ep = ep.address(),
+                        }
+                    }
+                }
+                if read_ep == 0 || write_ep == 0 {
+                    continue;
+                }
+                let candidate = (iface.number() as u8, read_ep, write_ep);
+                if is_mux {
+                    return Ok(candidate);
+                }
+                if fallback.is_none() {
+                    fallback = Some(candidate);
+                }
+            }
+        }
+        fallback.ok_or_else(|| "could not find mux endpoints".to_string())
     }
 
     pub fn send(&self, data: &[u8]) -> Result<(), MuxError> {

@@ -116,6 +116,17 @@ emit warnings.
 - `require_pair_record = true` (default) blocks unpaired clients from opening
   lockdown (port 62078).
 
+## Linux setup (one command)
+
+```sh
+sudo meridian-relay setup
+meridian-relay daemon        # or: sudo systemctl start meridian-relay
+```
+
+`setup` installs the udev rule (USB `TAG+="uaccess"` for session access) and
+the hardened systemd unit (`packaging/meridian-relay.service`), with
+`Type=notify` readiness and sandboxing. Use `--skip-service` to skip the unit.
+
 ## systemd
 
 ```sh
@@ -126,34 +137,37 @@ sudo systemctl enable --now meridian-relay.service
 The service uses `Type=notify` (the daemon sends `READY=1` once bound) and
 sandboxing directives; see the unit file.
 
-## Windows setup
+## Windows setup (one command)
 
-Two one-time steps, both covered by the installer artifacts in `packaging/`:
+In an **elevated** terminal:
 
-1. **WinUSB driver binding.** Windows can't talk raw USB to an iPhone until
-   the interface has a WinUSB function driver. Install
-   `packaging/meridian-relay-winusb.inf` (sign the catalog for production):
+```powershell
+meridian-relay.exe setup
+```
 
-   ```powershell
-   pnputil /add-driver .\packaging\meridian-relay-winusb.inf /install
-   ```
+This is fully self-contained and idempotent. It:
+1. extracts the embedded WinUSB **INF** (matched by the Apple mux interface
+   class triple `FF/FE/02` — covers all iPhone/iPad models and modes),
+2. stages it into the driver store via `pnputil` (every *future* device
+   attaches to WinUSB automatically),
+3. rebinds **already-attached** devices immediately via
+   `UpdateDriverForPlugAndPlayDevices` (no replug needed),
+4. installs the auto-start Windows service (drop with `--skip-service`).
 
-   Note: while a device is WinUSB-bound, iTunes will not see it. Reassign
-   the driver to Apple's stack if you need iTunes for the same device.
+Then:
 
-2. **Windows service.**
+```powershell
+sc.exe start meridian-relay
+meridian-relay.exe list     # or: watch / info / stats
+```
 
-   ```powershell
-   .\meridian-relay.exe service install
-   sc.exe start meridian-relay
-   ```
+While a device is WinUSB-bound, iTunes won't see it; running
+`pnputil /delete-driver oem<N>.inf /uninstall /force` (or Device Manager →
+update driver → Apple) restores iTunes access.
 
-   The daemon runs as LocalSystem, listens on `\\.\pipe\meridian-relay`,
-   and reports proper StartPending/Running/Stopped states to the SCM.
-
-   ```powershell
-   .\meridian-relay.exe service uninstall
-   ```
+Manual fallback: `meridian-relay.exe service install|uninstall` only touches
+the service; the INF can also be deployed by hand from
+`packaging/meridian-relay-winusb.inf`.
 
 ### Windows-specific configuration
 

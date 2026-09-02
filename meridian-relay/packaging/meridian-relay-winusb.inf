@@ -2,23 +2,29 @@
 ; meridian-relay — WinUSB driver binding for Apple iOS devices
 ; ======================================================================
 ;
-; Binds Microsoft's inbox WinUSB driver to the Apple mobile-device USB
-; interface so libusb (used by meridian-relay) can open bulk pipes.
+; PURPOSE
+;   Binds Microsoft's inbox WinUSB driver to Apple mobile devices so
+;   libusb (used by meridian-relay) can open their mux interfaces.
 ;
-; IMPORTANT DEPLOYMENT NOTES
-; --------------------------
-; 1. Only ONE function driver can own the interface at a time. While a
-;    device is bound to WinUSB, iTunes/Apple Mobile Device Service will
-;    not see it. Install this INF only on devices you intend to use with
-;    meridian-relay.
-; 2. Test-sign this INF/CAT in CI before enterprise deployment. Unsigned
-;    INFs require "test mode" or are rejected on Secure Boot machines.
-; 3. Install:  pnputil /add-driver .\meridian-relay-winusb.inf /install
-;    Remove:    pnputil /delete-driver oem<N>.inf /uninstall
+; MATCHING STRATEGY
+;   Composite-interface class match on the Apple multiplexor interface:
+;     Class    = FF    (vendor specific)
+;     SubClass = FE    (254)
+;     Protocol = 02    (mux protocol)
+;   This matches the mux interface of every iPhone/iPad mode (initial,
+;   Valeria, CDC-NCM) across all product IDs — no per-model list to
+;   maintain.
 ;
-; Device VID/PIDs below cover Apple mobile devices from iPhone 5s through
-; iPhone 16 (interface class FF/FE/01 - vendor specific, mux interface).
-
+; DEPLOYMENT NOTES
+;   - While bound to WinUSB, iTunes will not see the device. Remove the
+;     binding (pnputil /delete-driver oem<N>.inf /uninstall, or reassign
+;     via Device Manager) to restore iTunes.
+;   - Sign the catalog (.cat) for production/enterprise deployment.
+;     Unsigned packages are rejected when Secure Boot is enabled unless
+;     the machine permits test-signed drivers.
+;   - meridian-relay can install this automatically:
+;       meridian-relay.exe setup
+;
 [Version]
 Signature   = "$WINDOWS NT$"
 Class       = USBDevice
@@ -29,23 +35,11 @@ DriverVer   = 01/01/2026,0.3.0.0
 PnpLockdown = 1
 
 [Manufacturer]
-%ManufacturerName% = AppleDevices,NTamd64
+%ManufacturerName% = Interfaces,NTamd64
 
-[AppleDevices.NTamd64]
-%DeviceDesc% = WinUsb_Install, USB\VID_05AC&PID_12A8  ; iPhone 5s era
-%DeviceDesc% = WinUsb_Install, USB\VID_05AC&PID_12B0  ; iPhone 6
-%DeviceDesc% = WinUsb_Install, USB\VID_05AC&PID_12C0  ; iPhone 7
-%DeviceDesc% = WinUsb_Install, USB\VID_05AC&PID_12C8  ; iPhone 8/X
-%DeviceDesc% = WinUsb_Install, USB\VID_05AC&PID_12D0  ; iPhone XR/XS
-%DeviceDesc% = WinUsb_Install, USB\VID_05AC&PID_12D8  ; iPhone 11
-%DeviceDesc% = WinUsb_Install, USB\VID_05AC&PID_12E0  ; iPhone 12 / SE2
-%DeviceDesc% = WinUsb_Install, USB\VID_05AC&PID_12E8  ; iPhone 13
-%DeviceDesc% = WinUsb_Install, USB\VID_05AC&PID_12F0  ; iPhone 14
-%DeviceDesc% = WinUsb_Install, USB\VID_05AC&PID_12F8  ; iPhone 15
-%DeviceDesc% = WinUsb_Install, USB\VID_05AC&PID_1300  ; iPhone 16
-%DeviceDesc% = WinUsb_Install, USB\VID_05AC&PID_1310  ; iPad
-%DeviceDesc% = WinUsb_Install, USB\VID_05AC&PID_1318  ; iPad Pro
-%DeviceDesc% = WinUsb_Install, USB\VID_05AC&PID_1400  ; iPod touch 7
+[Interfaces.NTamd64]
+; Composite-interface compatible ID for the Apple mux interface.
+%DeviceDesc% = WinUsb_Install, USB\Class_FF&SubClass_FE&Prot_02
 
 ; ----------------------------------------------------------------------
 ; Generic WinUSB installation (per Microsoft docs)
@@ -73,5 +67,5 @@ HKR,,DeviceInterfaceGUIDs,0x10000,"{90197CFE-798F-4b3b-9B18-2DEAA6B19A1C}"
 
 [Strings]
 ManufacturerName = "Meridian Relay Project"
-DeviceDesc       = "Apple Mobile Device (WinUSB for meridian-relay)"
+DeviceDesc       = "Apple Mobile Device (WinUSB mux interface for meridian-relay)"
 WinUSB_SvcDesc   = "WinUSB Driver"
