@@ -63,9 +63,12 @@ impl Channel {
 async fn connect_lockdown(endpoint: &Endpoint, device_id: u32) -> LockdownResult<TransportStream> {
     let mut stream = endpoint.connect().await?;
     let mut p = plist::Dictionary::new();
+    p.insert("ClientVersion".into(), plist::Value::Integer(7.into()));
     p.insert("MessageType".into(), plist::Value::String("Connect".into()));
     p.insert("DeviceID".into(), plist::Value::Integer((device_id as u64).into()));
     p.insert("PortNumber".into(), plist::Value::Integer((LOCKDOWN_PORT.to_be() as u64).into()));
+    p.insert("ProgName".into(), plist::Value::String("meridian-relay".into()));
+    p.insert("kLibUSBMuxVersion".into(), plist::Value::Integer(3.into()));
     let pkt = RawPacket::new(p, XML_PLIST_VERSION, PLIST_MESSAGE_TYPE, 1);
     protocol::write_packet(&mut stream, &pkt).await?;
 
@@ -184,8 +187,14 @@ async fn read_plist(chan: &mut Channel) -> LockdownResult<plist::Dictionary> {
             }
         }
 
-        let idle = tokio::time::sleep(std::time::Duration::from_millis(IDLE_END_MS));
-        tokio::pin!(idle);
+        // Idle deadline applies only after we've begun receiving; with an empty
+        // buffer we wait the full hard deadline for the first bytes.
+        let idle_fut = if buf.is_empty() {
+            tokio::time::sleep(std::time::Duration::from_millis(u64::MAX / 2))
+        } else {
+            tokio::time::sleep(std::time::Duration::from_millis(IDLE_END_MS))
+        };
+        tokio::pin!(idle_fut);
 
         tokio::select! {
             n = tokio::time::timeout_at(hard_deadline, chan.read_into(&mut chunk)) => {
@@ -201,12 +210,12 @@ async fn read_plist(chan: &mut Channel) -> LockdownResult<plist::Dictionary> {
                     Err(_) => break, // deadline: deliver whatever we have
                 }
             }
-            _ = idle => { break; }
+            _ = &mut idle_fut => { break; }
         }
     }
 
     if buf.is_empty() {
-        return Err("lockdown sent no data".into());
+        return Err("lockdown sent no data within 10s (response dead on the wire)".into());
     }
     match plist::from_bytes::<plist::Value>(&buf) {
         Ok(v) => v.as_dictionary().cloned().ok_or_else(|| "lockdown response was not a dictionary".into()),
