@@ -20,7 +20,6 @@ use crate::daemon::transport::{Endpoint, TransportStream};
 use crate::daemon::connection::LOCKDOWN_PORT;
 
 const MAX_LOCKDOWN_RESPONSE: usize = 1024 * 1024;
-const IDLE_END_MS: u64 = 300;
 const REQUEST_TIMEOUT_SECS: u64 = 10;
 
 pub const BASIC_KEYS: &[&str] = &[
@@ -152,7 +151,10 @@ async fn tls_upgrade(
         }
     }
 
-    let config = rustls::ClientConfig::builder()
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let config = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .map_err(|e| format!("rustls provider init: {e}"))?
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(NoVerify))
         .with_client_auth_cert(cert_chain, key)?;
@@ -165,62 +167,50 @@ async fn tls_upgrade(
 }
 
 async fn write_plist(chan: &mut Channel, dict: &plist::Dictionary) -> LockdownResult<()> {
-    let mut buf = Vec::new();
-    plist::Value::Dictionary(dict.clone()).to_writer_xml(&mut buf)?;
-    chan.write_endpoint(&buf).await?;
+    // Lockdown wire format: u32 big-endian length prefix + XML plist body.
+    let mut body = Vec::new();
+    plist::Value::Dictionary(dict.clone()).to_writer_xml(&mut body)?;
+    let mut frame = Vec::with_capacity(4 + body.len());
+    frame.extend_from_slice(&(body.len() as u32).to_be_bytes());
+    frame.extend_from_slice(&body);
+    tracing::trace!("lockdown → {} bytes", frame.len());
+    chan.write_endpoint(&frame).await?;
     Ok(())
 }
 
 async fn read_plist(chan: &mut Channel) -> LockdownResult<plist::Dictionary> {
-    let mut buf: Vec<u8> = Vec::with_capacity(8192);
-    let mut chunk = [0u8; 16384];
-    let hard_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(REQUEST_TIMEOUT_SECS);
-
-    loop {
-        if buf.len() > MAX_LOCKDOWN_RESPONSE {
-            return Err("lockdown response exceeded cap".into());
-        }
-        // A parse attempt each iteration keeps framing implicit.
-        if let Ok(v) = plist::from_bytes::<plist::Value>(&buf) {
-            if let Some(d) = v.as_dictionary() {
-                return Ok(d.clone());
-            }
-        }
-
-        // Idle deadline applies only after we've begun receiving; with an empty
-        // buffer we wait the full hard deadline for the first bytes.
-        let idle_fut = if buf.is_empty() {
-            tokio::time::sleep(std::time::Duration::from_millis(u64::MAX / 2))
-        } else {
-            tokio::time::sleep(std::time::Duration::from_millis(IDLE_END_MS))
-        };
-        tokio::pin!(idle_fut);
-
-        tokio::select! {
-            n = tokio::time::timeout_at(hard_deadline, chan.read_into(&mut chunk)) => {
-                match n {
-                    Ok(Ok(0)) => {
-                        if buf.is_empty() {
-                            return Err("lockdown closed connection".into());
-                        }
-                        break;
-                    }
-                    Ok(Ok(n)) => buf.extend_from_slice(&chunk[..n]),
-                    Ok(Err(e)) => return Err(Box::new(e)),
-                    Err(_) => break, // deadline: deliver whatever we have
-                }
-            }
-            _ = &mut idle_fut => { break; }
-        }
+    // Wire format: BE u32 length prefix, then exactly that many plist bytes.
+    let mut len_buf = [0u8; 4];
+    read_exact_timeout(chan, &mut len_buf).await?;
+    let total = u32::from_be_bytes(len_buf) as usize;
+    if total > MAX_LOCKDOWN_RESPONSE {
+        return Err(format!("lockdown frame too large: {total}").into());
     }
+    let mut body = vec![0u8; total];
+    read_exact_timeout(chan, &mut body).await?;
+    tracing::trace!("lockdown ← {} bytes: {}", total, String::from_utf8_lossy(&body[..total.min(2048)]));
 
-    if buf.is_empty() {
-        return Err("lockdown sent no data within 10s (response dead on the wire)".into());
-    }
-    match plist::from_bytes::<plist::Value>(&buf) {
-        Ok(v) => v.as_dictionary().cloned().ok_or_else(|| "lockdown response was not a dictionary".into()),
+    match plist::from_bytes::<plist::Value>(&body) {
+        Ok(v) => v.as_dictionary().cloned()
+            .ok_or_else(|| "lockdown response was not a dictionary".into()),
         Err(e) => Err(format!("lockdown plist parse failed: {e}").into()),
     }
+}
+
+async fn read_exact_timeout(chan: &mut Channel, out: &mut [u8]) -> LockdownResult<()> {
+    let deadline = std::time::Duration::from_secs(REQUEST_TIMEOUT_SECS);
+    let mut filled = 0usize;
+    while filled < out.len() {
+        let n = tokio::time::timeout(deadline, chan.read_into(&mut out[filled..]))
+            .await
+            .map_err(|_| "lockdown read timed out")?
+            ?;
+        if n == 0 {
+            return Err("lockdown closed connection mid-frame".into());
+        }
+        filled += n;
+    }
+    Ok(())
 }
 
 async fn get_value_raw(chan: &mut Channel, key: &str) -> LockdownResult<Option<String>> {
@@ -283,47 +273,45 @@ pub async fn get_value(
 ) -> LockdownResult<Vec<(String, String)>> {
     let stream = connect_lockdown(endpoint, device_id).await?;
     let mut chan = Channel::Plain(stream);
-
-    // Try one probe first — maybe the device answers without a session.
-    let first = keys.first().copied().unwrap_or("DeviceName");
     let mut out = Vec::new();
-    match get_value_raw(&mut chan, first).await {
-        Ok(Some(v)) => {
-            out.push((first.to_string(), v));
-            for key in &keys[1..] {
+
+    // Session-first: modern iOS closes the channel on unpaired GetValue.
+    // Only fall back to probe-mode (sessionless) if there's no pair record.
+    let pair_record = mux_read_pair_record(endpoint, udid).await.ok();
+
+    match pair_record {
+        Some(ref pr) => {
+            let enable_ssl = start_session(&mut chan, pr).await?;
+            if enable_ssl {
+                debug!("lockdown upgraded to TLS for {udid}");
+                let Channel::Plain(s) = chan else {
+                    return Err("internal: expected plain channel at TLS upgrade".into());
+                };
+                chan = tls_upgrade(s, pr).await?;
+            }
+            for key in keys {
                 if let Ok(Some(v)) = get_value_raw(&mut chan, key).await {
                     out.push(((*key).to_string(), v));
                 }
             }
-            return Ok(out);
+            if out.is_empty() {
+                return Err("started session but lockdown returned no values (device may need to be unlocked/trusted)".into());
+            }
+            Ok(out)
         }
-        _ => {}
-    }
-
-    // Session path: fetch pair record, start session, possibly TLS, retry.
-    let pair_record = mux_read_pair_record(endpoint, udid).await?;
-
-    // Start session over the current plain channel.
-    let enable_ssl = start_session(&mut chan, &pair_record).await?;
-
-    if enable_ssl {
-        debug!("lockdown upgraded to TLS for {udid}");
-        let Channel::Plain(s) = chan else {
-            return Err("internal: expected plain channel at TLS upgrade".into());
-        };
-        chan = tls_upgrade(s, &pair_record).await?;
-    }
-
-    for key in keys {
-        if let Ok(Some(v)) = get_value_raw(&mut chan, key).await {
-            out.push(((*key).to_string(), v));
+        None => {
+            debug!("no pair record for {udid}; probing sessionless GetValue");
+            for key in keys {
+                if let Ok(Some(v)) = get_value_raw(&mut chan, key).await {
+                    out.push(((*key).to_string(), v));
+                }
+            }
+            if out.is_empty() {
+                return Err("no pair record and device refused sessionless queries".into());
+            }
+            Ok(out)
         }
     }
-
-    if out.is_empty() {
-        return Err("started session but lockdown returned no values (device may need to be unlocked/trusted)".into());
-    }
-    Ok(out)
 }
 
 /// Convenience: enrich the standard fields of a `Device` from lockdown.

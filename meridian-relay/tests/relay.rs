@@ -184,40 +184,58 @@ async fn relay_upstream_down_closes_client_cleanly() {
     relay.abort();
 }
 
-/// A tiny fake lockdown service: raw plist request/response on the channel.
+/// A tiny fake lockdown service: length-framed (BE u32) XML plists.
 async fn fake_lockdown_loop<S: tokio::io::AsyncReadExt + tokio::io::AsyncWriteExt + Unpin>(
     stream: &mut S,
 ) -> std::io::Result<()> {
-    let mut buf = Vec::new();
-    let mut chunk = [0u8; 8192];
+
     loop {
-        let n = tokio::time::timeout(Duration::from_secs(5), stream.read(&mut chunk)).await
-            .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "idle"))??;
-        if n == 0 {
+        // Read the frame length prefix.
+        let mut len_buf = [0u8; 4];
+        match tokio::time::timeout(Duration::from_secs(5), stream.read_exact(&mut len_buf)).await {
+            Ok(Ok(_)) => {}
+            _ => return Ok(()),
+        }
+        let total = u32::from_be_bytes(len_buf) as usize;
+        if total > 1024 * 1024 {
             return Ok(());
         }
-        buf.extend_from_slice(&chunk[..n]);
+        let mut body = vec![0u8; total];
+        tokio::io::AsyncReadExt::read_exact(stream, &mut body).await?;
 
-        // Try to parse a complete plist.
-        if let Ok(plist::Value::Dictionary(d)) = plist::from_bytes::<plist::Value>(&buf) {
-            let key = d.get("Key").and_then(|v| v.as_string()).unwrap_or("").to_string();
-            let val = match key.as_str() {
-                "DeviceName" => "Steve's iPhone 16 Pro",
-                "ProductType" => "iPhone17,1",
-                "ProductVersion" => "26.0.1",
-                "BuildVersion" => "23A345",
-                _ => "",
-            };
-            let mut resp = plist::Dictionary::new();
-            resp.insert("Request".into(), plist::Value::String("GetValue".into()));
-            resp.insert("Key".into(), plist::Value::String(key));
-            resp.insert("Value".into(), plist::Value::String(val.into()));
-            let mut out = Vec::new();
-            plist::Value::Dictionary(resp).to_writer_xml(&mut out).unwrap();
-            stream.write_all(&out).await?;
-            buf.clear();
+        let d = match plist::from_bytes::<plist::Value>(&body).ok().and_then(|v| v.as_dictionary().cloned()) {
+            Some(d) => d,
+            None => return Ok(()),
+        };
+
+        let key = d.get("Key").and_then(|v| v.as_string()).unwrap_or("").to_string();
+        let request = d.get("Request").and_then(|v| v.as_string()).unwrap_or("").to_string();
+
+        let mut resp = plist::Dictionary::new();
+        match request.as_str() {
+            "GetValue" => {
+                let val = match key.as_str() {
+                    "DeviceName" => "Steve's iPhone 16 Pro",
+                    "ProductType" => "iPhone17,1",
+                    "ProductVersion" => "26.0.1",
+                    "BuildVersion" => "23A345",
+                    _ => "",
+                };
+                resp.insert("Request".into(), plist::Value::String("GetValue".into()));
+                resp.insert("Key".into(), plist::Value::String(key));
+                resp.insert("Value".into(), plist::Value::String(val.into()));
+            }
+            _ => {
+                // Unknown request — respond with an empty Result-ish dict.
+                resp.insert("Request".into(), plist::Value::String(request));
+            }
         }
-        use tokio::io::AsyncWriteExt;
+
+        let mut body = Vec::new();
+        plist::Value::Dictionary(resp).to_writer_xml(&mut body).unwrap();
+        let mut frame = (body.len() as u32).to_be_bytes().to_vec();
+        frame.extend_from_slice(&body);
+        stream.write_all(&frame).await?;
     }
 }
 

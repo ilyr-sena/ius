@@ -72,6 +72,10 @@ impl DeviceManager {
         }
     }
 
+    pub async fn is_managed(&self, device_id: u32) -> bool {
+        self.devices.read().await.contains_key(&device_id)
+    }
+
     pub async fn add_device(&self, dev: &UsbDevice) {
         {
             let devices = self.devices.read().await;
@@ -117,7 +121,14 @@ impl DeviceManager {
             match AppleMuxInterface::open(&rusb_dev, usb_timeout) {
                 Ok(u) => Ok(Arc::new(u)),
                 Err(e) => {
-                    warn!("failed to open mux interface for {udid_for_block}: {e} (will retry next scan)");
+                    let msg = e.to_string();
+                    if msg.contains("busy") || msg.contains("Busy") {
+                        warn!(
+                            "failed to open mux interface for {udid_for_block}: {e} — likely held by another usbmuxd process (stop it, or use '--backend relay')"
+                        );
+                    } else {
+                        warn!("failed to open mux interface for {udid_for_block}: {e}");
+                    }
                     Err(())
                 }
             }

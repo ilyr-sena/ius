@@ -107,6 +107,22 @@ async fn run_daemon_inner(
                     let _ = event_tx_clone.send(change.clone());
                 }
 
+                // Reconcile: devices the scanner knows about but the manager
+                // hasn't claimed yet (e.g. transient "resource busy" errors at
+                // scan time) must be retried — attachment is edge-triggered,
+                // but management is level-based.
+                {
+                    let all = {
+                        let s = scanner_clone.read().await;
+                        s.get_devices()
+                    };
+                    for dev in all {
+                        if !device_manager_clone.is_managed(dev.device_id).await {
+                            device_manager_clone.add_device(&dev).await;
+                        }
+                    }
+                }
+
                 let count = {
                     let s = scanner_clone.read().await;
                     s.get_devices().len()

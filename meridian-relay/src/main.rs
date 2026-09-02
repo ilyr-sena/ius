@@ -134,7 +134,9 @@ fn make_daemon_args(cli: &Cli) -> DaemonArgs {
 }
 
 fn init_tracing(kind: &str) {
-    let filter = EnvFilter::from_default_env().add_directive(tracing::Level::INFO.into());
+    // RUST_LOG overrides; otherwise INFO floor.
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new(tracing::Level::INFO.to_string()));
     match kind {
         "json" => fmt().with_env_filter(filter).json().init(),
         "compact" => fmt().with_env_filter(filter).compact().init(),
