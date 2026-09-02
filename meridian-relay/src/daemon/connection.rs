@@ -56,7 +56,7 @@ pub async fn handle_client(
     }
 }
 
-fn peer_is_allowed(peer: &PeerIdentity, config: &DaemonConfig) -> bool {
+pub fn peer_is_allowed(peer: &PeerIdentity, config: &DaemonConfig) -> bool {
     // UID check (unix). Empty allowlist = allow all. A missing credential
     // when an allowlist exists is a denial (fail-closed).
     if !config.allowed_uids.is_empty() {

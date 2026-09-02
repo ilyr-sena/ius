@@ -85,9 +85,34 @@ pub struct DaemonArgs {
     #[arg(long = "allow-sid", value_delimiter = ',')]
     pub allow_sids: Vec<String>,
 
+    /// Daemon mode: "usb" = own the USB device directly (default),
+    /// "relay" = transparently proxy to another usbmuxd-compatible service
+    #[arg(long = "backend", default_value = "usb")]
+    pub backend: Backend,
+
+    /// [relay mode] Where the upstream service listens (default 127.0.0.1:27015)
+    #[arg(long = "upstream")]
+    pub upstream: Option<String>,
+
     /// Log output format: text or json
     #[arg(long = "log-format", default_value = "text")]
     pub log_format: LogFormat,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Backend {
+    Usb,
+    Relay,
+}
+
+impl std::fmt::Display for Backend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Backend::Usb => write!(f, "usb"),
+            Backend::Relay => write!(f, "relay"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum, PartialEq, Eq, Deserialize)]
@@ -123,6 +148,8 @@ pub struct ConfigFile {
     pub read_workers: Option<usize>,
     pub allowed_uids: Option<Vec<u32>>,
     pub allowed_sids: Option<Vec<String>>,
+    pub backend: Option<Backend>,
+    pub upstream: Option<String>,
     pub log_format: Option<LogFormat>,
 }
 
@@ -143,6 +170,8 @@ impl Default for ConfigFile {
             read_workers: None,
             allowed_uids: None,
             allowed_sids: None,
+            backend: None,
+            upstream: None,
             log_format: None,
         }
     }
@@ -176,6 +205,10 @@ pub struct DaemonConfig {
     pub connect_channel: usize,
     pub allowed_uids: Vec<u32>,
     pub allowed_sids: Vec<String>,
+    pub backend: Backend,
+    pub upstream: Endpoint,
+    /// Unparsed upstream string (pre-merge staging, like endpoint_raw).
+    pub upstream_raw: Option<String>,
     pub log_format: LogFormat,
 }
 
@@ -205,6 +238,9 @@ impl Default for DaemonConfig {
             connect_channel: DEFAULT_CONNECT_CHANNEL,
             allowed_uids: Vec::new(),
             allowed_sids: Vec::new(),
+            backend: Backend::Usb,
+            upstream: Endpoint::parse("tcp:127.0.0.1:27015").expect("default upstream must parse"),
+            upstream_raw: None,
             log_format: LogFormat::Text,
         }
     }
@@ -286,6 +322,12 @@ impl DaemonConfig {
         if let Some(ref sids) = file.allowed_sids {
             self.allowed_sids = sids.clone();
         }
+        if let Some(b) = file.backend {
+            self.backend = b;
+        }
+        if let Some(ref u) = file.upstream {
+            self.upstream_raw = Some(u.clone());
+        }
         if let Some(f) = file.log_format {
             self.log_format = f;
         }
@@ -338,6 +380,10 @@ impl DaemonConfig {
         if !args.allow_sids.is_empty() {
             self.allowed_sids = args.allow_sids.clone();
         }
+        self.backend = args.backend;
+        if let Some(ref u) = args.upstream {
+            self.upstream_raw = Some(u.clone());
+        }
         self.log_format = args.log_format;
     }
 
@@ -348,6 +394,9 @@ impl DaemonConfig {
             if let Endpoint::Unix(ref p) = self.endpoint {
                 self.socket_path = p.clone();
             }
+        }
+        if let Some(ref raw) = self.upstream_raw {
+            self.upstream = Endpoint::parse(raw)?;
         }
         Ok(())
     }

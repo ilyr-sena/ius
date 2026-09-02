@@ -165,6 +165,26 @@ While a device is WinUSB-bound, iTunes won't see it; running
 `pnputil /delete-driver oem<N>.inf /uninstall /force` (or Device Manager →
 update driver → Apple) restores iTunes access.
 
+### No drivers at all? Use relay mode (Windows, free)
+
+If you can't/won't bind drivers — e.g. locked-down enterprise machines —
+meridian-relay can run as a **transparent relay to Apple's own mux service**
+(the free "Apple Mobile Device Service" that ships with iTunes or the
+[Apple Devices](https://aka.ms/AppleDevices) Store app):
+
+```powershell
+meridian-relay.exe daemon --backend relay
+# or with a custom upstream:
+meridian-relay.exe daemon --backend relay --upstream tcp:127.0.0.1:27015
+```
+
+Every client command (`list`, `connect`, pair-record CRUD, raw proxies, the
+same endpoint for third-party tools) passes through unchanged. Pair-record
+enforcement, peer allowlists, metrics, and stats still apply at our edge.
+Config file equivalents: `backend = "relay"`, `upstream = "tcp:127.0.0.1:27015"`.
+
+`--backend relay` works on Linux too (e.g. to chain relays across hosts).
+
 Manual fallback: `meridian-relay.exe service install|uninstall` only touches
 the service; the INF can also be deployed by hand from
 `packaging/meridian-relay-winusb.inf`.

@@ -5,6 +5,7 @@ pub mod connection;
 pub mod mux;
 pub mod usb;
 pub mod transport;
+pub mod relay;
 
 use std::sync::Arc;
 use tokio::sync::Semaphore;

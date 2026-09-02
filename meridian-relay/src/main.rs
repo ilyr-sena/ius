@@ -26,6 +26,15 @@ struct Cli {
     #[arg(long, global = true)]
     socket_path: Option<std::path::PathBuf>,
 
+    /// Daemon backend: usb (default) or relay (proxy to an upstream usbmuxd, e.g.
+    /// Apple's AppleMobileDeviceService on Windows at tcp:127.0.0.1:27015).
+    #[arg(long, global = true, default_value = "usb")]
+    backend: meridian_relay::config::Backend,
+
+    /// Upstream endpoint for relay mode.
+    #[arg(long, global = true)]
+    upstream: Option<String>,
+
     #[arg(long, global = true, default_value = "pretty")]
     log_format: String,
 }
@@ -115,6 +124,8 @@ fn make_daemon_args(cli: &Cli) -> DaemonArgs {
         read_workers: None,
         allow_uids: Vec::new(),
         allow_sids: Vec::new(),
+        backend: cli.backend,
+        upstream: cli.upstream.clone(),
         log_format: match cli.log_format.as_str() {
             "json" => LogFormat::Json,
             _ => LogFormat::Text,
@@ -318,6 +329,8 @@ async fn run_daemon_entry(cli: &Cli, print: bool) -> Result<(), Box<dyn std::err
 
     if print {
         println!("endpoint = {}", config.endpoint.display_string());
+        println!("backend = {}", config.backend);
+        println!("upstream = {}", config.upstream.display_string());
         println!("socket_mode = {:o}", config.socket_mode);
         println!("pipe_security = {}", config.pipe_security);
         println!("lockdown_dir = {:?}", config.lockdown_dir);
@@ -350,7 +363,14 @@ async fn run_daemon_entry(cli: &Cli, print: bool) -> Result<(), Box<dyn std::err
         }
     });
 
-    daemon::run_daemon(config, metrics, shutdown_signal()).await
+    match config.backend {
+        meridian_relay::config::Backend::Relay => {
+            daemon::relay::run_relay(config, metrics, shutdown_signal()).await
+        }
+        meridian_relay::config::Backend::Usb => {
+            daemon::run_daemon(config, metrics, shutdown_signal()).await
+        }
+    }
 }
 
 fn print_device_info(info: &device::Device, _no_color: bool) {
