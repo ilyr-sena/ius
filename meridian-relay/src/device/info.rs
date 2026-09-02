@@ -10,7 +10,9 @@ use crate::daemon::transport::Endpoint;
 /// to an upstream mux service; no external tools required). Fallback: the
 /// `ideviceinfo` binary when present (a nice-to-have on top, not a dep).
 pub async fn enrich_device_info(device: &mut Device, endpoint: &Endpoint) {
-    super::lockdown::enrich_via_lockdown(device, endpoint).await;
+    if let Err(e) = super::lockdown::enrich_via_lockdown(device, endpoint).await {
+        warn!("lockdown enrichment failed: {e}");
+    }
 
     // Fill in anything still missing via ideviceinfo when available (unix
     // power tool; simply absent by default on Windows).
@@ -77,7 +79,7 @@ pub async fn enrich_all(devices: &mut [Device], endpoint: &Endpoint) {
     let futures = devices
         .iter_mut()
         .map(|d| super::lockdown::enrich_via_lockdown(d, endpoint));
-    futures::future::join_all(futures).await;
+    let _ = futures::future::join_all(futures).await;
 }
 
 fn parse_ideviceinfo_output(output: &str) -> HashMap<String, String> {

@@ -212,6 +212,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let ep = Endpoint::parse(&endpoint)?;
             enrich_device_info(&mut enriched, &ep).await;
             print_device_info(&enriched, no_color);
+            if enriched.name.is_none() {
+                eprintln!("\n(note: device info missing — if the phone shows \"Trust This Computer?\", tap Trust and retry.)");
+            }
         }
 
         Commands::Watch { ref udid } => {
