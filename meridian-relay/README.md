@@ -81,6 +81,18 @@ meridian-relay stats [-n 10]        # daemon metrics snapshot(s)
 All commands accept `--socket-path` / `USBMUXD_SOCKET_ADDRESS` to point at a
 custom daemon socket.
 
+## Tunnel (iproxy replacement)
+
+```sh
+meridian-relay tunnel 9100:9100 8100:8100      # local:device ports
+meridian-relay tunnel --udid <UDID> 62078:62078
+```
+
+Each accepted local TCP connection is transparently spliced into a mux
+Connect to the device port, through the active backend (usb or relay).
+Unlike iproxy this survives reconnects, works against relay endpoints, and
+shares the daemon's security policy.
+
 ## Configuration
 
 Every setting has a built-in default; a TOML file overrides defaults, CLI
