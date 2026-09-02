@@ -73,6 +73,15 @@ enum Commands {
         #[arg(short, long)]
         count: Option<u32>,
     },
+    /// TCP tunnel: forward local ports into device ports (iproxy replacement).
+    /// e.g. `meridian-relay tunnel 9100:9100 8100:8100` on a relay endpoint.
+    Tunnel {
+        /// "local:device" port pairs.
+        pairs: Vec<String>,
+        /// udid — optional; picks the first device otherwise.
+        #[arg(long)]
+        udid: Option<String>,
+    },
     /// One-command host provisioning: installs drivers/rules and the service.
     /// Safe to re-run; idempotent.
     Setup {
@@ -266,6 +275,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     std::process::exit(1);
                 }
             }
+        }
+
+        Commands::Tunnel { pairs, udid: _ } => {
+            let pairs = meridian_relay::tunnel::parse_pairs(&pairs)
+                .map_err(|e| format!("bad tunnel spec: {e}"))?;
+            let ep = Endpoint::parse(&endpoint)?;
+            println!("tunneling: {}", pairs.iter().map(|(a,b)| format!("{a}→{b}")).collect::<Vec<_>>().join(", "));
+            meridian_relay::tunnel::run(ep, pairs, None).await?;
         }
 
         Commands::Stats { count } => {

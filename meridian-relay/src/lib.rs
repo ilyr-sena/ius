@@ -5,6 +5,7 @@ pub mod metrics;
 pub mod platform;
 pub mod security;
 pub mod setup;
+pub mod tunnel;
 
 #[cfg(windows)]
 pub mod service;
