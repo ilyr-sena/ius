@@ -5,11 +5,14 @@ import Network
 import VideoToolbox
 
 // ---------------------------------------------------------------------------
-// Minimal fMP4 box builders (H.264/AVCC, single video track)
+// fMP4 box builders (H.264/AVCC, single video track).
+// Every fragment carries mfhd + tfhd + tfdt + trun + mdat — tfdt is what naive
+// implementations miss and Safari/MSE need it for accurate timeline mapping.
 // ---------------------------------------------------------------------------
 private enum MP4 {
     static func u16(_ v: UInt16) -> Data { withUnsafeBytes(of: v.bigEndian) { Data($0) } }
     static func u32(_ v: UInt32) -> Data { withUnsafeBytes(of: v.bigEndian) { Data($0) } }
+    static func u64(_ v: UInt64) -> Data { withUnsafeBytes(of: v.bigEndian) { Data($0) } }
 
     static func box(_ type: String, _ payload: Data) -> Data {
         var out = Data()
@@ -34,7 +37,6 @@ private enum MP4 {
         return d
     }()
 
-    /// Init segment: ftyp + moov + mvex (zero durations; fragmented stream).
     static func buildInit(avcC: Data, width: Int, height: Int) -> Data {
         let ftyp = box("ftyp", Data("iso5".utf8) + u32(0)
                               + Data("iso5".utf8) + Data("iso6".utf8) + Data("mp41".utf8))
@@ -109,10 +111,10 @@ private enum MP4 {
         return box("avc1", d)
     }
 
-    /// One-sample media fragment: moof (patched data_offset) + mdat.
-    static func buildFragment(seq: UInt32, duration: UInt32,
-                              sampleSize: Int, isSync: Bool,
-                              payload: Data) -> Data {
+    /// One-sample fragment: moof (mfhd + tfhd + tfdt + trun) + mdat.
+    static func buildFragment(seq: UInt32, baseDecodeTicks: UInt64, duration: UInt32,
+                              sampleSize: Int, isSync: Bool, payload: Data) -> Data {
+        // sample_flags: is_non_sync_sample(16) | sample_depends_on(2: "not I")|(1: "I")
         let flags: UInt32 = isSync ? 0x02000000 : 0x01010000
 
         var trunPayload = Data()
@@ -123,9 +125,11 @@ private enum MP4 {
         trunPayload.append(u32(flags))
         let trun = fullbox("trun", 0, 0x000701, trunPayload)
 
+        // tfdt v1 — base media decode time for this fragment (timescale 60000).
+        let tfdt = fullbox("tfdt", 1, 0, u64(baseDecodeTicks))
         let tfhd = fullbox("tfhd", 0, 0x020000, u32(1))   // default-base-is-moof
         let mfhd = fullbox("mfhd", 0, 0, u32(seq))
-        let traf = box("traf", tfhd + trun)
+        let traf = box("traf", tfhd + tfdt + trun)
         var moof = box("moof", mfhd + traf)
 
         let mdat = box("mdat", payload)
@@ -137,7 +141,6 @@ private enum MP4 {
         return moof + mdat
     }
 
-    /// "avc1.XXYYZZ" derived from SPS profile/compat/level bytes inside avcC.
     static func codecString(avcC: Data) -> String? {
         guard avcC.count >= 6 else { return nil }
         let i = avcC.startIndex
@@ -147,19 +150,43 @@ private enum MP4 {
 }
 
 // ---------------------------------------------------------------------------
-// Hardware H.264 encoder fed by SCK samples -> fMP4 -> WebSocket viewers
+// Stream configuration — live-adjustable, persisted across runs.
+// ---------------------------------------------------------------------------
+struct StreamTuning: Codable {
+    var bitrateMbps: Double = 4.0      // target average bitrate
+    var maxFps: Double = 0             // 0 = uncapped
+    var scale: Double = 1.0            // resolution factor (0.25…1)
+    var keyframeSeconds: Double = 2.0  // IDR interval
+
+    static let bitsRange = 0.5...12.0
+    static let scaleRange = 0.25...1.0
+    static let fpsUpperBound = 60.0
+
+    func clamped() -> StreamTuning {
+        var t = self
+        t.bitrateMbps = min(max(t.bitrateMbps, Self.bitsRange.lowerBound), Self.bitsRange.upperBound)
+        t.scale = min(max(t.scale, Self.scaleRange.lowerBound), Self.scaleRange.upperBound)
+        t.maxFps = max(0, min(t.maxFps, Self.fpsUpperBound))
+        t.keyframeSeconds = max(0.5, min(t.keyframeSeconds, 10))
+        return t
+    }
+}
+
+// ---------------------------------------------------------------------------
+// H.264 encoder: VideoToolbox hardware session → fMP4 segments → broadcast.
 // ---------------------------------------------------------------------------
 final class H264Stream {
     static let shared = H264Stream()
 
     struct Client {
         let ws: WebSocketConn
-        var joined: Bool      // has received init segment + first keyframe
+        var joined: Bool
     }
 
     private let lock = NSLock()
     private var clients: [Client] = []
 
+    // Encoder state
     private var session: VTCompressionSession?
     private var encWidth = 0
     private var encHeight = 0
@@ -169,32 +196,372 @@ final class H264Stream {
     private var lastTicks: Int64?
     private var baseTicks: Int64?
     private var pendingForceKeyFrame = false
-    private var endingSession = false
+    private var isTearingDown = false      // guards against start-during-teardown races
+
+    // Live tuning + stats
+    private(set) var tuning = H264Stream.loadTuning()
+    private var tuningRevision: UInt64 = 0
+    private var shouldRecreate = false     // create new session at next frame
+    private var forcedFpsMinGap: Double = 0
+    private var lastAcceptedAt: DispatchTime?
+
+    // Throughput stats
+    private var bytesWindow = 0
+    private var framesWindow = 0
+    private var windowStart = DispatchTime.now()
+
+    // ---- tuning ------------------------------------------------------------
+
+    static func loadTuning() -> StreamTuning {
+        let d = UserDefaults.standard
+        if d.object(forKey: "ius.h264.bitrateMbps") == nil { return StreamTuning() }
+        return StreamTuning(
+            bitrateMbps: d.double(forKey: "ius.h264.bitrateMbps"),
+            maxFps: d.double(forKey: "ius.h264.maxFps"),
+            scale: d.double(forKey: "ius.h264.scale"),
+            keyframeSeconds: d.double(forKey: "ius.h264.keyframeSeconds")
+        )
+    }
+
+    private func persist(_ t: StreamTuning) {
+        let d = UserDefaults.standard
+        d.set(t.bitrateMbps, forKey: "ius.h264.bitrateMbps")
+        d.set(t.maxFps, forKey: "ius.h264.maxFps")
+        d.set(t.scale, forKey: "ius.h264.scale")
+        d.set(t.keyframeSeconds, forKey: "ius.h264.keyframeSeconds")
+    }
+
+    /// Live-apply a new tuning. Bitrate applies in-place; fps changes the gate;
+    /// scale forces an encoder recreation at the next frame boundary.
+    func applyTuning(_ t: StreamTuning) -> StreamTuning {
+        let t = t.clamped()
+        lock.lock()
+        let rebuild = t.scale != tuning.scale
+        tuning = t
+        tuningRevision &+= 1
+        forcedFpsMinGap = t.maxFps > 0 ? 1.0 / t.maxFps : 0
+        if rebuild { shouldRecreate = true }
+        persist(t)
+        let session = self.session
+        lock.unlock()
+
+        // VideoToolbox supports on-the-fly ABR retuning without a full session teardown.
+        if let s = session, !rebuild {
+            VTSessionSetProperty(s, key: kVTCompressionPropertyKey_AverageBitRate,
+                                 value: Int(t.bitrateMbps * 1_000_000) as CFNumber)
+            VTSessionSetProperty(s, key: kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration,
+                                 value: t.keyframeSeconds as CFNumber)
+            print("[ius] h264 tuning live: \(t.bitrateMbps)Mbps fps=\(t.maxFps == 0 ? "max" : "\(t.maxFps)")")
+        } else if rebuild {
+            print("[ius] h264 tuning change requires encoder rebuild at scale=\(t.scale)")
+        }
+        return t
+    }
+
+    func currentTuning() -> StreamTuning {
+        lock.lock(); defer { lock.unlock() }
+        return tuning
+    }
+
+    // ---- client management -------------------------------------------------
 
     var hasViewers: Bool {
         lock.lock(); defer { lock.unlock() }
         return !clients.isEmpty
     }
 
-    // ---- client management -------------------------------------------------
+    func clientCount() -> Int {
+        lock.lock(); defer { lock.unlock() }
+        return clients.count
+    }
 
+    func stats() -> [String: Any] {
+        lock.lock()
+        let (rev, w, h) = (tuningRevision, encWidth, encHeight)
+        let sess = session != nil
+        let (b, f) = (bytesWindow, framesWindow)
+        let clients = self.clients.count
+        lock.unlock()
+        let winElapsed = max(0.001, Double(DispatchTime.now().uptimeNanoseconds - windowStart.uptimeNanoseconds) / 1e9)
+        return [
+            "encoder": sess ? "running" : "idle",
+            "codec": "h264",
+            "width": w, "height": h, "tuningRev": rev,
+            "mbps": Double(b) * 8.0 / winElapsed / 1e6,
+            "fps": Double(f) / winElapsed,
+            "clients": clients,
+        ]
+    }
+
+    // ---- encode path -------------------------------------------------------
+
+    func push(sampleBuffer: CMSampleBuffer) {
+        guard hasViewers else { return }
+        guard let pb = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        let srcW = CVPixelBufferGetWidth(pb)
+        let srcH = CVPixelBufferGetHeight(pb)
+
+        lock.lock()
+        let tun = tuning
+        let recreate = shouldRecreate || session == nil
+        if recreate { shouldRecreate = false }
+        let fpsGap = forcedFpsMinGap
+        let last = lastAcceptedAt
+        lock.unlock()
+
+        // Frame-rate gate: drop frames when we're ahead of the cap.
+        if fpsGap > 0, let last {
+            let dt = Double(DispatchTime.now().uptimeNanoseconds - last.uptimeNanoseconds) / 1e9
+            if dt < fpsGap { return }
+        }
+
+        // Scale to the target size on-GPU — encoder gets the correct dims.
+        let targetW = Int((Double(srcW) * tun.scale / 2).rounded()) * 2
+        let targetH = Int((Double(srcH) * tun.scale / 2).rounded()) * 2
+        let (useW, useH) = (max(2, targetW), max(2, targetH))
+
+        if recreate {
+            teardownSession()
+            ensureSession(width: useW, height: useH, tuning: tun)
+        }
+        guard let s = session else { return }
+
+        var imageBuffer: CVPixelBuffer = pb
+        var toRelease: CVPixelBuffer?
+        if useW != srcW || useH != srcH {
+            guard let scaled = GPUScaler.shared.scale(pb, to: useW, useH) else { return }
+            imageBuffer = scaled
+            toRelease = scaled
+        }
+
+        let pts = CMSampleBufferGetOutputPresentationTimeStamp(sampleBuffer)
+        var props: CFDictionary?
+        lock.lock()
+        let forceKey = pendingForceKeyFrame
+        if forceKey { pendingForceKeyFrame = false }
+        lock.unlock()
+        if forceKey { props = [kVTEncodeFrameOptionKey_ForceKeyFrame: true] as CFDictionary }
+
+        let err = VTCompressionSessionEncodeFrame(s, imageBuffer: imageBuffer,
+                                                  presentationTimeStamp: pts,
+                                                  duration: .invalid,
+                                                  frameProperties: props,
+                                                  sourceFrameRefcon: nil,
+                                                  infoFlagsOut: nil)
+        if let r = toRelease { _ = r }  // keep alive through encode submission
+        if err == noErr {
+            lock.lock()
+            framesWindow += 1
+            lastAcceptedAt = DispatchTime.now()
+            lock.unlock()
+        }
+    }
+
+    private func ensureSession(width: Int, height: Int, tuning: StreamTuning) {
+        lock.lock()
+        if session != nil || isTearingDown {
+            lock.unlock()
+            return
+        }
+        isTearingDown = true
+        lock.unlock()
+
+        var session: VTCompressionSession?
+        let status = VTCompressionSessionCreate(
+            allocator: kCFAllocatorDefault,
+            width: Int32(width), height: Int32(height),
+            codecType: kCMVideoCodecType_H264,
+            encoderSpecification: [
+                kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder: true,
+            ] as CFDictionary,
+            imageBufferAttributes: nil,
+            compressedDataAllocator: nil,
+            outputCallback: { refCon, _, status, _, sb in
+                guard status == noErr, let sb, let refCon else { return }
+                let me = Unmanaged<H264Stream>.fromOpaque(refCon).takeUnretainedValue()
+                me.handleEncoded(sampleBuffer: sb)
+            },
+            refcon: Unmanaged.passUnretained(self).toOpaque(),
+            compressionSessionOut: &session)
+
+        guard status == noErr, let s = session else {
+            print("[ius] h264 encoder create failed: \(status)")
+            lock.lock(); isTearingDown = false; lock.unlock()
+            return
+        }
+        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_RealTime, value: kCFBooleanTrue)
+        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_AverageBitRate,
+                             value: Int(tuning.bitrateMbps * 1_000_000) as CFNumber)
+        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_ExpectedFrameRate,
+                             value: 60 as CFNumber)
+        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_MaxKeyFrameInterval,
+                             value: Int(60.0 * tuning.keyframeSeconds) as CFNumber)
+        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration,
+                             value: tuning.keyframeSeconds as CFNumber)
+        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_AllowFrameReordering,
+                             value: kCFBooleanFalse)
+        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_ProfileLevel,
+                             value: kVTProfileLevel_H264_High_AutoLevel)
+
+        lock.lock()
+        self.session = s
+        encWidth = width
+        encHeight = height
+        avcC = nil
+        initSegment = nil
+        lastTicks = nil
+        baseTicks = nil
+        seq = 0
+        isTearingDown = false
+        lock.unlock()
+        print("[ius] hw h264 encoder running \(width)x\(height) @ \(tuning.bitrateMbps)Mbps")
+    }
+
+    /// Full, safe teardown: complete outstanding encodes, invalidate, release.
+    private func teardownSession() {
+        lock.lock()
+        guard !isTearingDown, let s = session else { lock.unlock(); return }
+        session = nil
+        isTearingDown = true
+        lock.unlock()
+
+        // Complete pending frames off-thread so encode callbacks drain; then invalidate.
+        DispatchQueue(label: "ius.h264.teardown").async {
+            VTCompressionSessionCompleteFrames(s, untilPresentationTimeStamp: .invalid)
+            VTCompressionSessionInvalidate(s)
+        }
+        lock.lock(); isTearingDown = false; lock.unlock()
+        print("[ius] h264 encoder invalidated")
+    }
+
+    public func endSession() {
+        teardownSession()
+    }
+
+    // ---- packets -----------------------------------------------------------
+
+    private func isSyncFrame(_ sb: CMSampleBuffer) -> Bool {
+        if let arr = CMSampleBufferGetSampleAttachmentsArray(sb, createIfNecessary: false)
+            as? [[String: Any]], let first = arr.first {
+            let depends = first[kCMSampleAttachmentKey_DependsOnOthers as String] as? Bool ?? true
+            return !depends
+        }
+        return false
+    }
+
+    private func handleEncoded(sampleBuffer: CMSampleBuffer) {
+        guard let desc = CMSampleBufferGetFormatDescription(sampleBuffer) else { return }
+        guard let ext = CMFormatDescriptionGetExtensions(desc) as? [String: Any],
+              let atoms = ext["SampleDescriptionExtensionAtoms"] as? [String: Any],
+              let rawAtom = atoms["avcC"] as? Data, rawAtom.count > 8 else { return }
+
+        // Some SDKs wrap avcC with a size+fourcc prefix.
+        var newAvcC = rawAtom
+        if newAvcC.count >= 8,
+           Int(newAvcC[newAvcC.startIndex]) << 24 |
+           Int(newAvcC[newAvcC.startIndex+1]) << 16 |
+           Int(newAvcC[newAvcC.startIndex+2]) << 8 |
+           Int(newAvcC[newAvcC.startIndex+3]) == newAvcC.count,
+           newAvcC[newAvcC.startIndex+4...newAvcC.startIndex+7].elementsEqual("avcC".utf8) {
+            newAvcC = newAvcC.dropFirst(8)
+        }
+
+        var payload = Data()
+        if let cb = CMSampleBufferGetDataBuffer(sampleBuffer) {
+            var len = 0
+            var ptr: UnsafeMutablePointer<Int8>?
+            CMBlockBufferGetDataPointer(cb, atOffset: 0, lengthAtOffsetOut: nil,
+                                        totalLengthOut: &len, dataPointerOut: &ptr)
+            if len > 0 {
+                payload = Data(count: len)
+                payload.withUnsafeMutableBytes { raw in
+                    _ = CMBlockBufferCopyDataBytes(cb, atOffset: 0, dataLength: len,
+                                                   destination: raw.baseAddress!)
+                }
+            }
+        }
+        guard !payload.isEmpty else { return }
+
+        let pts = CMSampleBufferGetOutputPresentationTimeStamp(sampleBuffer)
+        let absTicks = Int64((CMTimeGetSeconds(pts) * 60000.0).rounded())
+
+        lock.lock()
+        if baseTicks == nil { baseTicks = absTicks }
+        let ticks = absTicks - (baseTicks ?? absTicks)
+        let isSync = isSyncFrame(sampleBuffer)
+
+        let avcChanged = (avcC != newAvcC)
+        if avcChanged {
+            avcC = newAvcC
+            initSegment = MP4.buildInit(avcC: newAvcC, width: encWidth, height: encHeight)
+        }
+        var duration: UInt32 = 1000
+        if let prev = lastTicks {
+            let delta = ticks - prev
+            if delta > 0 { duration = UInt32(min(delta, Int64(Int32.max))) }
+        }
+        lastTicks = ticks
+        bytesWindow += payload.count
+        seq &+= 1
+        let curSeq = seq
+        let initSegSnapshot = initSegment
+        let baseTicksNow = UInt64(max(0, ticks))
+        lock.unlock()
+
+        let codecStr = MP4.codecString(avcC: newAvcC) ?? "avc1.640028"
+        let frag = MP4.buildFragment(seq: curSeq,
+                                     baseDecodeTicks: baseTicksNow,
+                                     duration: duration,
+                                     sampleSize: payload.count,
+                                     isSync: isSync,
+                                     payload: payload)
+
+        lock.lock()
+        var targets: [(WebSocketConn, Bool)] = []
+        for i in clients.indices {
+            targets.append((clients[i].ws, !clients[i].joined))
+            if !clients[i].joined { clients[i].joined = true }
+        }
+        lock.unlock()
+
+        for (ws, newlyJoined) in targets {
+            if newlyJoined {
+                guard isSync else { continue }
+                ws.enqueue(opcode: 0x1, payload: Data("{\"codec\":\"\(codecStr)\"}".utf8))
+                if let seg = initSegSnapshot { ws.enqueue(opcode: 0x2, payload: seg) }
+            }
+            ws.enqueue(opcode: 0x2, payload: frag)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Client transport + viewer fanout
+// ---------------------------------------------------------------------------
+extension H264Stream {
     func addWebSocket(_ conn: NWConnection) {
         let ws = WebSocketConn(conn: conn) { [weak self] in
             self?.remove(conn)
         }
-        ws.onMessage = { isText, data in
-            guard isText,
-                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  obj["kind"] != nil else { return }
-            let reply = WdaRelay.shared.handle(message: obj)
-            if let replyData = try? JSONSerialization.data(withJSONObject: reply) {
-                ws.enqueue(opcode: 0x1, payload: replyData)
+        ws.onMessage = { [weak self] isText, data in
+            guard let self, isText,
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            else { return }
+            let op = obj["op"] as? String ?? ""
+            if op == "tune" || op == "query" {
+                self.handleControl(obj, reply: ws)
+            } else if obj["kind"] != nil {
+                // Forward control channel (gestures, taps, swipes) to WDA
+                let reply = WdaRelay.shared.handle(message: obj)
+                if let d = try? JSONSerialization.data(withJSONObject: reply) {
+                    ws.enqueue(opcode: 0x1, payload: d)
+                }
             }
         }
         lock.lock()
         clients.append(Client(ws: ws, joined: false))
         let n = clients.count
-        let needForce = n == 1 || session != nil   // mid-stream joiner wants IDR now
+        let needForce = n == 1 || session != nil
         if needForce { pendingForceKeyFrame = true }
         lock.unlock()
         print("[ius] h264 viewer connected (\(n) total)")
@@ -214,343 +581,305 @@ final class H264Stream {
         }
     }
 
-    // ---- encoding ----------------------------------------------------------
-
-    func push(sampleBuffer: CMSampleBuffer) {
-        guard hasViewers else { return }
-        guard let pb = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
-        let w = CVPixelBufferGetWidth(pb)
-        let h = CVPixelBufferGetHeight(pb)
-        ensureSession(width: w, height: h)
-
-        var props: CFDictionary?
-        lock.lock()
-        if pendingForceKeyFrame {
-            props = [kVTEncodeFrameOptionKey_ForceKeyFrame: true] as CFDictionary
-            pendingForceKeyFrame = false
-        }
-        lock.unlock()
-
-        guard let session = session else { return }
-        let pts = CMSampleBufferGetOutputPresentationTimeStamp(sampleBuffer)
-        VTCompressionSessionEncodeFrame(session,
-                                        imageBuffer: pb,
-                                        presentationTimeStamp: pts,
-                                        duration: .invalid,
-                                        frameProperties: props,
-                                        sourceFrameRefcon: nil,
-                                        infoFlagsOut: nil)
-    }
-
-    private func ensureSession(width: Int, height: Int) {
-        lock.lock()
-        if session != nil || endingSession {
-            lock.unlock()
-            return
-        }
-        endingSession = true
-        lock.unlock()
-
-        var session: VTCompressionSession?
-        let status = VTCompressionSessionCreate(
-            allocator: kCFAllocatorDefault,
-            width: Int32(width), height: Int32(height),
-            codecType: kCMVideoCodecType_H264,
-            encoderSpecification: [
-                kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder: true,
-                kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder: true,
-            ] as CFDictionary,
-            imageBufferAttributes: nil,
-            compressedDataAllocator: nil,
-            outputCallback: { refCon, _, status, _, sampleBuffer in
-                guard status == noErr, let sb = sampleBuffer, let refCon else { return }
-                let me = Unmanaged<H264Stream>.fromOpaque(refCon).takeUnretainedValue()
-                me.handleEncoded(sampleBuffer: sb)
-            },
-            refcon: Unmanaged.passUnretained(self).toOpaque(),
-            compressionSessionOut: &session)
-
-        guard status == noErr, let s = session else {
-            print("[ius] h264 encoder create failed: \(status)")
-            lock.lock(); endingSession = false; lock.unlock()
-            return
-        }
-        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_RealTime,
-                             value: kCFBooleanTrue)
-        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_AverageBitRate,
-                             value: 10_000_000 as CFNumber)
-        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_ExpectedFrameRate,
-                             value: 60 as CFNumber)
-        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_MaxKeyFrameInterval,
-                             value: 120 as CFNumber)
-        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_AllowFrameReordering,
-                             value: kCFBooleanFalse)
-        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_ProfileLevel,
-                             value: kVTProfileLevel_H264_High_AutoLevel)
-
-        lock.lock()
-        self.session = s
-        encWidth = width
-        encHeight = height
-        avcC = nil
-        initSegment = nil
-        lastTicks = nil
-        baseTicks = nil
-        seq = 0
-        endingSession = false
-        lock.unlock()
-        print("[ius] hw h264 encoder running \(width)x\(height)")
-    }
-
-    func endSession() {
-        lock.lock()
-        guard !endingSession else { lock.unlock(); return }
-        let s = session
-        session = nil
-        endingSession = true
-        lock.unlock()
-        _ = s
-        lock.lock(); session = nil; endingSession = false; lock.unlock()
-        print("[ius] hw h264 encoder stopped")
-    }
-
-    private func dependsOnOthersFalse(_ sb: CMSampleBuffer) -> Bool {
-        if let arr = CMSampleBufferGetSampleAttachmentsArray(sb, createIfNecessary: false)
-            as? [[String: Any]],
-           let first = arr.first {
-            let depends = first[kCMSampleAttachmentKey_DependsOnOthers as String] as? Bool ?? true
-            return !depends
-        }
-        return false
-    }
-
-    private func handleEncoded(sampleBuffer: CMSampleBuffer) {
-        guard let desc = CMSampleBufferGetFormatDescription(sampleBuffer) else { return }
-        guard let ext = CMFormatDescriptionGetExtensions(desc) as? [String: Any],
-              let atoms = ext["SampleDescriptionExtensionAtoms"] as? [String: Any],
-              let rawAtom = atoms["avcC"] as? Data, rawAtom.count > 8 else { return }
-        // SDK may hand us the complete atom (size+fourcc+payload); normalize
-        var newAvcC = rawAtom
-        if newAvcC.count >= 8,
-           Int(newAvcC[newAvcC.startIndex]) << 24 |
-             Int(newAvcC[newAvcC.startIndex+1]) << 16 |
-             Int(newAvcC[newAvcC.startIndex+2]) << 8 |
-             Int(newAvcC[newAvcC.startIndex+3]) == newAvcC.count,
-           newAvcC[newAvcC.startIndex+4...newAvcC.startIndex+7].elementsEqual("avcC".utf8) {
-            newAvcC = newAvcC.dropFirst(8)
-        }
-
-        var size = 0
-        if let cb = CMSampleBufferGetDataBuffer(sampleBuffer) {
-            var len = 0
-            var ptr: UnsafeMutablePointer<Int8>?
-            CMBlockBufferGetDataPointer(cb, atOffset: 0, lengthAtOffsetOut: nil,
-                                        totalLengthOut: &len, dataPointerOut: &ptr)
-            size = len
-        }
-        guard size > 0 else { return }
-        var payload = Data(count: size)
-        payload.withUnsafeMutableBytes { raw in
-            _ = CMBlockBufferCopyDataBytes(
-                CMSampleBufferGetDataBuffer(sampleBuffer)!,
-                atOffset: 0, dataLength: size, destination: raw.baseAddress!)
-        }
-
-        let pts = CMSampleBufferGetOutputPresentationTimeStamp(sampleBuffer)
-        let absTicks = Int64((CMTimeGetSeconds(pts) * 60000.0).rounded())
-        lock.lock()
-        if baseTicks == nil { baseTicks = absTicks }
-        let ticks = absTicks - (baseTicks ?? absTicks)
-        lock.unlock()
-        let isSync = dependsOnOthersFalse(sampleBuffer)
-
-        lock.lock()
-        let changed = (avcC != newAvcC)
-        if changed {
-            avcC = newAvcC
-            initSegment = MP4.buildInit(avcC: newAvcC,
-                                        width: encWidth, height: encHeight)
-        }
-        var duration: UInt32 = 1000
-        if let prev = lastTicks {
-            let delta = ticks - prev
-            if delta > 0 { duration = UInt32(min(delta, Int64(Int32.max))) }
-        }
-        lastTicks = ticks
-        seq &+= 1
-        let curSeq = seq
-        let initSeg = initSegment
-
-        // Snapshot targets under lock; enqueue OUTSIDE the lock.
-        // (An overflowing viewer triggers close()->remove() which re-enters
-        // this lock - holding it during enqueues would deadlock.)
-        let codecStr = MP4.codecString(avcC: newAvcC) ?? "avc1.640028"
-        let frag = MP4.buildFragment(seq: curSeq, duration: duration,
-                                     sampleSize: size, isSync: isSync,
-                                     payload: payload)
-        let initSegSnapshot = initSegment
-
-        var targets: [(WebSocketConn, Bool)] = []
-        for i in clients.indices {
-            targets.append((clients[i].ws, !clients[i].joined))
-            if !clients[i].joined { clients[i].joined = true }
-        }
-        lock.unlock()
-
-        var joinedCount = 0
-        for (ws, newlyJoined) in targets {
-            if newlyJoined {
-                guard isSync else { continue }          // late joiner waits for IDR
-                ws.enqueue(opcode: 0x1,
-                    payload: Data("{\"codec\":\"\(codecStr)\"}".utf8))
-                if let seg = initSegSnapshot { ws.enqueue(payload: seg) }
-                joinedCount += 1
-                print("[ius] h264 viewer joined stream")
+    /// Control messages from viewers ({"op":"tune", ...} / {"op":"query"}).
+    private func handleControl(_ obj: [String: Any], reply: WebSocketConn?) {
+        guard let op = obj["op"] as? String else { return }
+        switch op {
+        case "query":
+            let t = currentTuning()
+            let body: [String: Any] = [
+                "op": "tuning",
+                "bitrateMbps": t.bitrateMbps, "maxFps": t.maxFps,
+                "scale": t.scale, "keyframeSeconds": t.keyframeSeconds,
+            ]
+            if let data = try? JSONSerialization.data(withJSONObject: body) {
+                reply?.enqueue(opcode: 0x1, payload: data)
             }
-            ws.enqueue(payload: frag)
+        case "tune":
+            var t = currentTuning()
+            if let b = obj["bitrateMbps"] as? NSNumber { t.bitrateMbps = b.doubleValue }
+            if let f = obj["maxFps"] as? NSNumber { t.maxFps = f.doubleValue }
+            if let s = obj["scale"] as? NSNumber { t.scale = s.doubleValue }
+            if let k = obj["keyframeSeconds"] as? NSNumber { t.keyframeSeconds = k.doubleValue }
+            let applied = applyTuning(t)
+            let body: [String: Any] = [
+                "op": "tuning", "applied": true,
+                "bitrateMbps": applied.bitrateMbps, "maxFps": applied.maxFps,
+                "scale": applied.scale, "keyframeSeconds": applied.keyframeSeconds,
+            ]
+            if let data = try? JSONSerialization.data(withJSONObject: body) {
+                broadcastText(data)
+            }
+        default:
+            break
         }
-        if joinedCount > 0 { print("[ius] joined count: \(joinedCount)") }
+    }
+
+    private func broadcastText(_ data: Data) {
+        lock.lock()
+        let targets = clients.map { $0.ws }
+        lock.unlock()
+        for ws in targets { ws.enqueue(opcode: 0x1, payload: data) }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GPU scaler — shared Core Image context, reused scratch buffers.
+// ---------------------------------------------------------------------------
+final class GPUScaler {
+    static let shared = GPUScaler()
+
+    private let ciContext: CIContext
+    private var pool: CVPixelBufferPool?
+    private var poolW = 0, poolH = 0
+
+    private init() {
+        if let dev = MTLCreateSystemDefaultDevice() {
+            ciContext = CIContext(mtlDevice: dev)
+        } else {
+            ciContext = CIContext()
+        }
+    }
+
+    func scale(_ src: CVPixelBuffer, to w: Int, _ h: Int) -> CVPixelBuffer? {
+        let ci = CIImage(cvPixelBuffer: src)
+        if poolW != w || poolH != h {
+            let attrs: [CFString: Any] = [
+                kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_32BGRA,
+                kCVPixelBufferWidthKey: w,
+                kCVPixelBufferHeightKey: h,
+                kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary,
+            ]
+            var p: CVPixelBufferPool?
+            CVPixelBufferPoolCreate(nil, nil, attrs as CFDictionary, &p)
+            pool = p
+            poolW = w; poolH = h
+        }
+        guard let pool else { return nil }
+        var out: CVPixelBuffer?
+        CVPixelBufferPoolCreatePixelBuffer(nil, pool, &out)
+        guard let ob = out else { return nil }
+        let rect = CGRect(x: 0, y: 0, width: w, height: h)
+        let scaled = ci
+            .applyingFilter("CILanczosScaleTransform", parameters: [
+                kCIInputScaleKey: min(Double(w) / Double(CVPixelBufferGetWidth(src)),
+                                      Double(h) / Double(CVPixelBufferGetHeight(src))),
+            ])
+        ciContext.render(scaled, to: ob, bounds: rect, colorSpace: CGColorSpaceCreateDeviceRGB())
+        return ob
     }
 }
 
 extension H264Stream {
     static let playerHTML = """
 <!doctype html>
-<html><head><meta charset="utf-8"><title>IUS live - H.264</title>
-<style>body{background:#0b0b0f;color:#ddd;font-family:ui-monospace,monospace;text-align:center;margin:0;padding:12px}
-video{max-width:100%;max-height:86vh;background:#000;border-radius:6px}
-#s{opacity:.7;font-size:13px;margin-top:8px}</style></head>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Meridian Relay — Live</title>
+<style>
+  :root { --bg:#0e0e13; --panel:#16161d; --line:#262633; --fg:#e6e6ef; --dim:#9d9db0; --acc:#4f8eff; --warn:#ffb340; }
+  * { box-sizing:border-box; margin:0; padding:0 }
+  body { background:var(--bg); color:var(--fg); font-family:ui-sans-serif,system-ui,-apple-system,sans-serif; height:100vh; display:flex; flex-direction:column; overflow:hidden; }
+  header { display:flex; align-items:center; gap:14px; padding:10px 16px; background:var(--panel); border-bottom:1px solid var(--line); flex-shrink:0; }
+  header h1 { font-size:15px; font-weight:600; letter-spacing:.2px }
+  .chip { display:inline-flex; align-items:center; gap:6px; font-size:12px; color:var(--dim); background:#0f0f15; border:1px solid var(--line); padding:3px 9px; border-radius:999px; }
+  .chip b { color:var(--fg); font-weight:600; }
+  .chip .dot { width:7px; height:7px; border-radius:50%; background:var(--warn); }
+  .chip.live .dot { background:#4ade80; box-shadow:0 0 6px #4ade8088; }
+  .spacer { flex:1 }
+  button, select { background:#1e1e28; color:var(--fg); border:1px solid var(--line); border-radius:8px; font:inherit; font-size:13px; padding:6px 10px; cursor:pointer; }
+  button:hover, select:hover { border-color:var(--acc) }
+  main { position:relative; flex:1; display:flex; align-items:center; justify-content:center; background:#000; min-height:0; }
+  video { max-width:100%; max-height:100%; outline:none; }
+  #toast { position:absolute; top:12px; left:50%; transform:translateX(-50%); background:rgba(22,22,29,.92); border:1px solid var(--line); color:var(--fg); border-radius:10px; padding:7px 14px; font-size:13px; opacity:0; transition:opacity .18s; pointer-events:none; }
+  #toast.show { opacity:1 }
+  #panel { position:absolute; right:12px; top:12px; width:230px; background:rgba(20,20,28,.96); border:1px solid var(--line); border-radius:12px; padding:12px; transform:translateX(0); transition:transform .18s, opacity .18s; backdrop-filter: blur(8px); }
+  #panel.closed { transform:translateX(calc(100% + 14px)); opacity:0; pointer-events:none; }
+  #panel h2 { font-size:12px; text-transform:uppercase; letter-spacing:.08em; color:var(--dim); margin-bottom:10px; }
+  .row { display:flex; align-items:center; justify-content:space-between; gap:8px; margin:8px 0; }
+  .row label { font-size:12px; color:var(--dim) }
+  .row input[type=range] { flex:1; accent-color:var(--acc) }
+  .row .val { font-variant-numeric:tabular-nums; font-size:12px; color:var(--fg); width:52px; text-align:right }
+  .seg { display:flex; gap:4px }
+  .seg button { padding:4px 8px; font-size:12px }
+  .seg button.on { background:var(--acc); border-color:var(--acc); color:#fff }
+</style></head>
 <body>
-<h3>IUS SCK - hardware H.264 / fMP4</h3>
-<video id="v" autoplay muted playsinline></video>
-<div id="s">connecting...</div>
+<header>
+  <h1>Meridian Relay</h1>
+  <span id="statLive" class="chip"><span class="dot"></span><b id="statCodec">h264</b></span>
+  <span class="chip">bitrate <b id="statMbps">–</b></span>
+  <span class="chip">fps <b id="statFps">–</b></span>
+  <span class="chip">latency <b id="statLat">–</b></span>
+  <div class="spacer"></div>
+  <button id="btnTune" title="Stream settings (S)">⚙ Tune</button>
+  <button id="btnFs" title="Fullscreen (F)">⤢ Fullscreen</button>
+</header>
+<main>
+  <video id="v" autoplay muted playsinline></video>
+  <div id="toast"></div>
+  <aside id="panel" class="closed">
+    <h2>Stream settings</h2>
+    <div class="row"><label>Bitrate</label><input id="rBitrate" type="range" min="0.5" max="12" step="0.5"><span class="val" id="vBitrate"></span></div>
+    <div class="row"><label>Frame rate</label><div class="seg" id="segFps"></div></div>
+    <div class="row"><label>Scale</label><div class="seg" id="segScale"></div></div>
+    <div class="row"><label>Keyframe</label><div class="seg" id="segKey"></div></div>
+    <div class="row" style="margin-top:12px"><button id="btnSave" style="flex:1">Apply</button></div>
+  </aside>
+</main>
 <script>
-const v = document.getElementById('v'), st = document.getElementById('s');
-let ws = null, msb = null, sb = null, queue = [], codec = '';
+(() => {
+  const v = document.getElementById('v'), toast = document.getElementById('toast');
+  const statLive = document.getElementById('statLive'), statMbps = document.getElementById('statMbps');
+  const statFps = document.getElementById('statFps'), statLat = document.getElementById('statLat');
+  const panel = document.getElementById('panel');
+  let ws, ms, sb, retryT, codec = 'avc1.640028';
+  let pending = [], appending = false, started = false;
+  let rxBytes = 0, rxStamp = performance.now(), fpsCount = 0, fpsStamp = performance.now();
 
-function setStatus(t){ st.textContent = t; }
+  // ---- stats ---------------------------------------------------------------
+  const fmtMbps = b => (b * 8 / 1e6).toFixed(2);
+  setInterval(() => {
+    const now = performance.now();
+    const dt = (now - rxStamp) / 1000; rxStamp = now;
+    statMbps.textContent = fmtMbps(rxBytes / dt);
+    const fdt = (now - fpsStamp) / 1000; fpsStamp = now;
+    statFps.textContent = Math.round(fpsCount / fdt);
+    rxBytes = 0; fpsCount = 0;
+  }, 800);
 
-function openMSE(){
-  if (msb) return;
-  setStatus('opening MSE (' + codec + ')');
-  msb = new MediaSource();
-  msb.addEventListener('sourceopen', onSourceOpen);
-  v.src = URL.createObjectURL(msb);
-}
+  function toastMsg(t) {
+    toast.textContent = t; toast.classList.add('show');
+    clearTimeout(toast._t); toast._t = setTimeout(() => toast.classList.remove('show'), 1600);
+  }
 
-function onSourceOpen(){
-  setStatus('MSE open');
-  sb = msb.addSourceBuffer('video/mp4; codecs="' + codec + '"');
-  sb.mode = 'segments';
-  sb.addEventListener('updateend', () => { pump(); trim(); live(); });
-  sb.addEventListener('error', () => {
-    setStatus('decoder error - reloading');
-    setTimeout(() => location.reload(), 900);
-  });
-  pump();
-}
+  // ---- MSE setup -----------------------------------------------------------
+  function openMSE(mime) {
+    if (ms) return;
+    ms = new MediaSource();
+    ms.addEventListener('sourceopen', () => {
+      try {
+        sb = ms.addSourceBuffer(mime);
+        sb.mode = 'segments';
+        sb.addEventListener('updateend', drain);
+        drain();
+        statLive.classList.add('live');
+      } catch (e) { toastMsg('MSE unsupported: ' + e.message); }
+    });
+    v.src = URL.createObjectURL(ms);
+  }
 
-function pump(){
-  if (!sb || sb.updating) return;
-  const c = queue.shift();
-  if (c === undefined) return;
-  try { sb.appendBuffer(c); }
-  catch(e) { }
-}
+  function drain() {
+    if (!sb || sb.updating || appending) return;
+    const c = pending.shift();
+    if (!c) return;
+    appending = true;
+    try { sb.appendBuffer(c); } catch (e) {}
+    appending = false;
+  }
 
-function trim(){
-  try {
-    if (sb && sb.buffered.length && sb.buffered.start(0) < sb.buffered.end(sb.buffered.length-1) - 30)
-      sb.remove(0, sb.buffered.end(sb.buffered.length-1) - 15);
-  } catch(e){}
-}
-
-function live(){
-  try {
-    if (sb && sb.buffered.length) {
-      const end = sb.buffered.end(sb.buffered.length-1);
-      if (v.currentTime < end - 2.5) v.currentTime = Math.max(0, end - 0.35);
-      setStatus('live (buffer ' + Math.max(0, end - v.currentTime).toFixed(2) + 's)');
+  function liveEdge() {
+    if (!sb || !sb.buffered.length) return;
+    const end = sb.buffered.end(sb.buffered.length - 1);
+    const behind = end - v.currentTime;
+    statLat.textContent = behind.toFixed(2) + 's';
+    if (behind > 3) v.currentTime = end - 0.3;          // jump to live edge
+    else if (v.paused || v.ended) v.play().catch(() => {});
+    // keep buffer tight
+    if (behind > 15 && sb.buffered.length > 0) {
+      try { sb.remove(sb.buffered.start(0), end - 6); } catch (e) {}
     }
-  } catch(e){}
-}
-
-ws = new WebSocket((location.protocol === 'https:' ? 'wss' : 'ws') + '://' + location.host + '/stream.ws');
-ws.binaryType = 'arraybuffer';
-
-ws.onopen = () => setStatus('ws open - waiting for keyframe');
-ws.onerror = () => setStatus('ws error');
-ws.onclose = () => {
-  setStatus('disconnected - retrying');
-  setTimeout(() => location.reload(), 1200);
-};
-
-ws.onmessage = (e) => {
-  if (typeof e.data === 'string') {
-    const j = JSON.parse(e.data);
-    if (!j.codec) return;
-    codec = j.codec;
-    openMSE();
-  } else {
-    if (queue.length > 240) queue.splice(0, 120);
-    queue.push(new Uint8Array(e.data));
-    if (!opened_flag()) setStatus('queued ' + queue.length);
-    pump();
   }
-};
+  setInterval(liveEdge, 400);
 
-function opened_flag(){ return msb !== null; }
+  // ---- websocket -----------------------------------------------------------
+  function connect() {
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    ws = new WebSocket(proto + '://' + location.host + '/stream.ws');
+    ws.binaryType = 'arraybuffer';
 
-// ---- remote control: mouse -> WDA actions ---------------------------------
-let dragging = false; let moved = false; let sx = 0, sy = 0;
-const pressT0 = performance.now();
-
-function mapXY(ev){
-  const r = v.getBoundingClientRect();
-  const vw = v.videoWidth || 1, vh = v.videoHeight || 1;
-  const sc = Math.min(r.width / vw, r.height / vh);
-  const dw = vw * sc, dh = vh * sc;
-  const ox = r.left + (r.width - dw) / 2;
-  const oy = r.top + (r.height - dh) / 2;
-  return [Math.round((ev.clientX - ox) / sc), Math.round((ev.clientY - oy) / sc)];
-}
-function moveAct(x, y, dur){ return {type:"pointerMove", x:Math.round(x), y:Math.round(y), duration:dur||0}; }
-function downAct(){ return {type:"pointerDown", button:0}; }
-function upAct(){ return {type:"pointerUp", button:0}; }
-
-v.addEventListener('mousedown', ev => {
-  [sx, sy] = mapXY(ev);
-  dragging = true; moved = false;
-});
-window.addEventListener('mousemove', ev => {
-  if (!dragging) return;
-  const [x, y] = mapXY(ev);
-  if (Math.hypot(x - sx, y - sy) > 8) moved = true;
-});
-window.addEventListener('mouseup', ev => {
-  if (!dragging) return;
-  dragging = false;
-  const [ex, ey] = mapXY(ev);
-  const held = Math.round(performance.now() - pressT0);
-  let acts;
-  if (!moved) {
-    acts = [moveAct(sx, sy), downAct(),
-            {type:"pause", duration: Math.min(700, Math.max(60, held))},
-            upAct()];
-  } else {
-    const steps = 24;
-    acts = [moveAct(sx, sy), downAct()];
-    for (let i = 1; i < steps; i++)
-      acts.push(moveAct(sx + (ex-sx)*i/steps, sy + (ey-sy)*i/steps,
-                        Math.max(4, Math.round(320/steps))));
-    acts.push(moveAct(ex, ey, 30));
-    acts.push(upAct());
+    ws.onopen = () => {
+      toastMsg('connected');
+      queryTuning();
+    };
+    ws.onclose = () => {
+      statLive.classList.remove('live');
+      toastMsg('disconnected — retrying');
+      retryT = setTimeout(connect, 800);
+    };
+    ws.onerror = () => {};
+    ws.onmessage = ev => {
+      if (typeof ev.data === 'string') {
+        let m; try { m = JSON.parse(ev.data); } catch { return; }
+        if (m.codec) { codec = m.codec; document.getElementById('statCodec').textContent = codec; openMSE('video/mp4; codecs="' + codec + '"'); }
+        if (m.op === 'tuning') fillTuning(m);
+      } else {
+        pending.push(new Uint8Array(ev.data));
+        rxBytes += ev.data.byteLength; fpsCount++;
+        if (pending.length > 240) pending.splice(0, pending.length - 120);
+        drain();
+      }
+    };
   }
-  ws.send(JSON.stringify({kind:"actions", wait:true, actions:acts}));
-  setStatus('sent ' + (moved ? 'swipe' : 'tap') + ' (' + ex + ',' + ey + ')');
-});
+  connect();
 
-setInterval(() => { pump(); trim(); live(); }, 500);
+  // ---- tuning panel --------------------------------------------------------
+  const state = { bitrateMbps: 4, maxFps: 0, scale: 1, keyframeSeconds: 2 };
+  document.getElementById('btnTune').onclick = () => panel.classList.toggle('closed');
+  document.getElementById('btnFs').onclick = () => {
+    if (document.fullscreenElement) document.exitFullscreen(); else v.requestFullscreen();
+  };
+
+  const rBitrate = document.getElementById('rBitrate');
+  const vBitrate = document.getElementById('vBitrate');
+  const segFps = document.getElementById('segFps');
+  const segScale = document.getElementById('segScale');
+  const segKey = document.getElementById('segKey');
+
+  function segInit(el, opts, cur, fmt, cb) {
+    el.innerHTML = '';
+    for (const o of opts) {
+      const b = document.createElement('button');
+      b.textContent = fmt(o);
+      b.classList.toggle('on', o === cur);
+      b.onclick = () => { cb(o); segInit(el, opts, o, fmt, cb); };
+      el.appendChild(b);
+    }
+  }
+  rBitrate.oninput = () => { state.bitrateMbps = parseFloat(rBitrate.value); vBitrate.textContent = rBitrate.value + ' M'; };
+  segInit(segFps, [0, 30, 60], 0, v => v === 0 ? 'max' : v, v => state.maxFps = v);
+  segInit(segScale, [0.5, 0.75, 1.0], 1, v => (v * 100) + '%', v => state.scale = v);
+  segInit(segKey, [1, 2, 5], 2, v => v + 's', v => state.keyframeSeconds = v);
+
+  function fillTuning(m) {
+    Object.assign(state, {
+      bitrateMbps: m.bitrateMbps ?? state.bitrateMbps,
+      maxFps: m.maxFps ?? state.maxFps,
+      scale: m.scale ?? state.scale,
+      keyframeSeconds: m.keyframeSeconds ?? state.keyframeSeconds,
+    });
+    rBitrate.value = state.bitrateMbps; vBitrate.textContent = state.bitrateMbps + ' M';
+    segInit(segFps, [0, 30, 60], state.maxFps, v => v === 0 ? 'max' : v, v => state.maxFps = v);
+    segInit(segScale, [0.5, 0.75, 1.0], state.scale, v => (v * 100) + '%', v => state.scale = v);
+    segInit(segKey, [1, 2, 5], state.keyframeSeconds, v => v + 's', v => state.keyframeSeconds = v);
+  }
+
+  document.getElementById('btnSave').onclick = () => {
+    ws.send(JSON.stringify({
+      op: 'tune', bitrateMbps: state.bitrateMbps, maxFps: state.maxFps,
+      scale: state.scale, keyframeSeconds: state.keyframeSeconds,
+    }));
+    toastMsg('applied: ' + state.bitrateMbps + ' Mbps · ' + (state.maxFps || 'max') + ' fps · ' + Math.round(state.scale * 100) + '%');
+  };
+
+  function queryTuning() { try { ws.send(JSON.stringify({ op: 'query' })); } catch {} }
+
+  document.addEventListener('keydown', e => {
+    if (e.key === 'f' || e.key === 'F') { if (document.fullscreenElement) document.exitFullscreen(); else v.requestFullscreen(); }
+    if (e.key === 's' || e.key === 'S') panel.classList.toggle('closed');
+  });
+})();
 </script>
+</body></html>
 """
 }

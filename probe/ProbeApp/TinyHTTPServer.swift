@@ -45,6 +45,7 @@ final class TinyHTTPServer {
                 return
             }
             let head = String(decoding: buf[..<r.lowerBound], as: UTF8.self)
+            let body = Data(buf[r.upperBound...])
             let lines = head.split(separator: "\r\n").map(String.init)
             let first = lines.first ?? ""
             let parts = first.split(separator: " ")
@@ -60,16 +61,29 @@ final class TinyHTTPServer {
                 headers[k] = v
             }
 
+            // POST with a Content-Length we haven't fully received yet — keep reading.
+            if method == "POST",
+               let cl = headers["content-length"].flatMap(Int.init), body.count < cl {
+                self.receive(conn, buf)
+                return
+            }
+
+            self.dispatch(conn, method: method, path: path, rawPath: rawPath, headers: headers, body: body)
+        }
+    }
+
+    private func dispatch(_ conn: NWConnection, method: String, path: String, rawPath: String,
+                          headers: [String: String], body: Data) {
             // MJPEG-style exact-path takeover
             if method == "GET", path == "/stream", let sh = self.streamHandler {
                 sh(conn, rawPath)
                 return
             }
 
-            // WebSocket upgrade
+            // WebSocket upgrade (exact match only — avoid grabbing unrelated paths)
             if method == "GET",
                headers["upgrade"]?.lowercased() == "websocket",
-               path.hasPrefix("/stream.ws"), let sh = self.webSocketHandler {
+               path == "/stream.ws", let sh = self.webSocketHandler {
                 let accept = Self.wsAccept(key: headers["sec-websocket-key"] ?? "")
                 let resp = "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n" +
                            "Connection: Upgrade\r\nSec-WebSocket-Accept: \(accept)\r\n\r\n"
@@ -79,22 +93,42 @@ final class TinyHTTPServer {
                 return
             }
 
+            // POST body JSON routes
+            if method == "POST", path == "/stream/tuning" {
+                let obj = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any] ?? [:]
+                var t = H264Stream.shared.currentTuning()
+                if let v = obj["bitrateMbps"] as? NSNumber { t.bitrateMbps = v.doubleValue }
+                if let v = obj["maxFps"] as? NSNumber { t.maxFps = v.doubleValue }
+                if let v = obj["scale"] as? NSNumber { t.scale = v.doubleValue }
+                if let v = obj["keyframeSeconds"] as? NSNumber { t.keyframeSeconds = v.doubleValue }
+                let applied = H264Stream.shared.applyTuning(t)
+                let out: [String: Any] = [
+                    "ok": true, "bitrateMbps": applied.bitrateMbps, "maxFps": applied.maxFps,
+                    "scale": applied.scale, "keyframeSeconds": applied.keyframeSeconds,
+                ]
+                let b = (try? JSONSerialization.data(withJSONObject: out)) ?? Data()
+                let resp = "HTTP/1.1 200\r\nContent-Type: application/json\r\nContent-Length: \(b.count)\r\n\r\n"
+                var o = Data(resp.utf8); o.append(b)
+                conn.send(content: o, completion: .contentProcessed { _ in conn.cancel() })
+                return
+            }
+
             // Raw byte routes (html pages etc.)
             if method == "GET", let rh = self.rawHandler,
-               let (status, ctype, body) = rh(method, path) {
+               let (status, ctype, rawBody) = rh(method, path) {
                 var resp = "HTTP/1.1 \(status)\r\nContent-Type: \(ctype)\r\n" +
-                           "Content-Length: \(body.count)\r\nConnection: close\r\n\r\n"
+                           "Content-Length: \(rawBody.count)\r\nConnection: close\r\n\r\n"
                 var out = Data(resp.utf8)
-                out.append(body)
+                out.append(rawBody)
                 conn.send(content: out, completion: .contentProcessed { _ in conn.cancel() })
                 return
             }
 
             let (status, json) = self.handler?(method, path) ?? (404, ["error": "not found"])
-            let body = (try? JSONSerialization.data(withJSONObject: json)) ?? Data()
-            var resp = "HTTP/1.1 \(status)\r\nContent-Type: application/json\r\nContent-Length: \(body.count)\r\nConnection: close\r\n\r\n"
+            let outBody = (try? JSONSerialization.data(withJSONObject: json)) ?? Data()
+            var resp = "HTTP/1.1 \(status)\r\nContent-Type: application/json\r\nContent-Length: \(outBody.count)\r\nConnection: close\r\n\r\n"
             var out = Data(resp.utf8)
-            out.append(body)
+            out.append(outBody)
             conn.send(content: out, completion: .contentProcessed { _ in conn.cancel() })
         }
     }
@@ -103,8 +137,6 @@ final class TinyHTTPServer {
         wsSHA1(Data((key + wsGUID).utf8)).base64EncodedString()
     }
 }
-
-import CryptoKit
 
 private func wsSHA1(_ data: Data) -> Data {
     Data(Insecure.SHA1.hash(data: data))

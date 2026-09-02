@@ -106,7 +106,19 @@ final class ProbeOrchestrator {
             lock.lock(); let cap = capturingOnly; lock.unlock()
             var out: [String: Any] = ["capturing": cap]
             if cap { out["stats"] = capture.stats() }
+            out["h264"] = H264Stream.shared.stats()
             return (200, out)
+
+        case ("GET", "/stream/tuning"):
+            let t = H264Stream.shared.currentTuning()
+            return (200, [
+                "bitrateMbps": t.bitrateMbps, "maxFps": t.maxFps,
+                "scale": t.scale, "keyframeSeconds": t.keyframeSeconds,
+            ])
+
+        case ("POST", "/stream/tuning"):
+            // Handled inside TinyHTTPServer (needs request body).
+            return (501, ["error": "tuning via POST body: see HTTP handler"])
         case ("GET", "/probe/report"):
             lock.lock(); var out = report; out["phase"] = phase; lock.unlock()
             return (200, out)
