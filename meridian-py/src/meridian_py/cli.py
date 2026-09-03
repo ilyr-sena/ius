@@ -54,6 +54,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_tun.add_argument("pairs", nargs="+");
     p_tun.add_argument("--udid", default=None)
 
+    p_stream = sub.add_parser("stream", help="stream the screen and nothing else")
+    p_stream.add_argument("--udid", default=None)
+    p_stream.add_argument("--no-launch", action="store_true", help="skip launching the probe app on device")
+    p_stream.add_argument("--open", action="store_true", help="open the player in a browser")
+
     return p
 
 
@@ -79,6 +84,9 @@ def main() -> int:
             case "run":
                 from .runner import run_session
                 return run_session(cfg, args)
+            case "stream":
+                from .commands import stream_cmd
+                return stream_cmd(cfg, args)
             case "tunnel":
                 from .commands import tunnel_cmd
                 return tunnel_cmd(cfg, args.pairs, args.udid)

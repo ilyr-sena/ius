@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import socket
 import threading
+import time
 from typing import Optional
 
 from .client import MuxClient
@@ -19,9 +20,9 @@ log = logging.getLogger(__name__)
 class _Forwarder(threading.Thread):
     def __init__(self, upstream: socket.socket, downstream: socket.socket, name: str):
         super().__init__(daemon=True, name=name)
-        self.up = upstream
-        self.dn = downstream
-
+        self.up = upstream  # to-device (mux)
+        self.dn = downstream  # from client (local PC)
+    
     def run(self) -> None:
         try:
             while True:
@@ -35,6 +36,13 @@ class _Forwarder(threading.Thread):
             for s in (self.up, self.dn):
                 try: s.shutdown(socket.SHUT_RDWR)
                 except OSError: pass
+
+
+def _splice_pair(upstream: socket.socket, downstream: socket.socket, name: str):
+    """Start both directions; returns when either side closes."""
+    t1 = _Forwarder(upstream, downstream, f"{name}-d2u")
+    t2 = _Forwarder(downstream, upstream, f"{name}-u2d")
+    t1.start(); t2.start()
 
 
 class Tunnel:
@@ -94,11 +102,39 @@ class Tunnel:
 
     def _run_client(self, client: socket.socket) -> None:
         try:
-            did = self._resolve_device()
-            upstream = self.mux.connect(did, self.device_port)
+            did = self._resolve_device_alive()
         except Exception as e:
-            log.warning("tunnel connect failed: %s", e)
+            log.warning("no mux device ready: %s", e)
             try: client.close()
             except OSError: pass
             return
-        _Forwarder(upstream, client, f"tunnel-{self.local_port}").start()
+        # One retry; failures are expected until the listener appears on device.
+        last_err: Exception | None = None
+        for attempt in range(2):
+            try:
+                upstream = self.mux.connect(did, self.device_port)
+                break
+            except Exception as e:
+                last_err = e
+                time.sleep(0.2)
+        else:
+            log.warning("tunnel connect refused (device port %d not listening yet)", self.device_port)
+            try: client.close()
+            except OSError: pass
+            return
+        _splice_pair(upstream, client, f"tunnel-{self.local_port}")
+
+    def _resolve_device_alive(self) -> int:
+        """Resolve device_id, waiting briefly for a fresh ListDevices."""
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            devices = self.mux.list_devices()
+            if not devices:
+                raise RuntimeError("no devices attached")
+            if self.device_udid:
+                match = [d for d in devices if d.udid == self.device_udid]
+                if not match:
+                    raise RuntimeError(f"device {self.device_udid} not attached")
+                return match[0].device_id
+            return devices[0].device_id
+        raise RuntimeError("mux never answered device list")

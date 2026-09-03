@@ -7,6 +7,7 @@ beyond the current invocation.
 from __future__ import annotations
 
 import logging
+import os
 import signal
 import sys
 import time
@@ -192,5 +193,85 @@ def tunnel_cmd(cfg: Config, pairs: list[str], udid: str | None) -> int:
     signal.signal(signal.SIGTERM, _sig)
 
     print("tunnels up — Ctrl+C to stop")
+    signal.pause()
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# stream: launch the probe app and expose the :9100 endpoint only.
+
+def stream_cmd(cfg: Config, args) -> int:
+    """Stream-focused mode: tunnels + probe launch, no WDA/HID/HTTP pad."""
+    import signal
+
+    mux = _mux(cfg)
+
+    # Check device presence.
+    devices = mux.list_devices()
+    if not devices:
+        log.error("no devices attached")
+        return 1
+    udid = args.udid or devices[0].udid
+    if not any(d.udid == udid for d in devices):
+        log.error("device %s not attached", udid)
+        return 1
+    log.info("stream mode on %s", udid[:16])
+
+    # Optional app launch — but only *after* the tunnels are up, so connect
+    # failures mean something. Launch happens in the background; you can also
+    # just open the probe app on the phone by hand.
+    if not args.no_launch:
+        def _launch_in_bg():
+            try:
+                import asyncio
+                from pymobiledevice3.remote.core_device.app_service import AppServiceService
+                from pymobiledevice3.tunneld.api import get_tunneld_devices
+
+                async def _app_launch():
+                    rsds = await get_tunneld_devices(("127.0.0.1", cfg.tunneld_port))
+                    rsd = next((r for r in rsds if getattr(r, 'udid', None) == udid), None)
+                    if rsd is None:
+                        raise RuntimeError("tunneld can't reach this device")
+                    async with AppServiceService(rsd) as svc:
+                        await svc.launch_application(cfg.probe_bundle)
+
+                asyncio.run(_app_launch())
+                log.info("probe app launched")
+            except Exception as e:
+                log.warning(
+                    "could not launch the probe app itself — install it once, then it will just work: %s",
+                    e,
+                )
+
+        import threading as _th
+        _th.Thread(target=_launch_in_bg, daemon=True).start()
+
+    # Tunnels are what actually move the stream bytes to the local box.
+    pairs = [(p, p) for (p, _) in cfg.iproxy_ports]
+    if not pairs:
+        pairs = [(9100, 9100)]
+    tunnels = [Tunnel(mux, lp, dp, udid) for lp, dp in pairs]
+    for t in tunnels:
+        t.start()
+        log.info("tunnel :%d → device :%d", t.local_port, t.device_port)
+
+    def _sig(*_a):
+        print()
+        for t in tunnels:
+            t.stop()
+        log.info("stopping")
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT, _sig)
+    signal.signal(signal.SIGTERM, _sig)
+
+    if getattr(args, "open", False) or not os.environ.get("SSH_TTY"):
+        try:
+            import webbrowser
+            webbrowser.open(f"http://127.0.0.1:{pairs[0][0]}/stream.html")
+        except Exception:
+            pass
+
+    print(f"stream: http://127.0.0.1:{pairs[0][0]}/stream.html  (or /stream for MJPEG)")
     signal.pause()
     return 0
