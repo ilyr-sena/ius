@@ -275,3 +275,36 @@ def stream_cmd(cfg: Config, args) -> int:
     print(f"stream: http://127.0.0.1:{pairs[0][0]}/stream.html  (or /stream for MJPEG)")
     signal.pause()
     return 0
+
+
+# ---------------------------------------------------------------------------
+# sideload: provision, sign, and install an IPA over USB directly from Linux
+
+def sideload_cmd(cfg: Config, args) -> int:
+    """Sign and install an IPA package directly over USB."""
+    from pathlib import Path
+    from .sideload import sideload_app
+
+    ipa_path = Path(args.ipa)
+    if not ipa_path.exists():
+        log.error("file not found: %s", args.ipa)
+        return 1
+
+    custom_key = Path(args.key) if getattr(args, "key", None) else None
+    custom_cert = Path(args.cert) if getattr(args, "cert", None) else None
+
+    try:
+        sideload_app(
+            ipa_path=ipa_path,
+            udid=args.udid or cfg.udid,
+            bundle_id=getattr(args, "bundle_id", None),
+            force_renew=getattr(args, "renew", False),
+            force_login=getattr(args, "login", False),
+            custom_key=custom_key,
+            custom_cert=custom_cert,
+        )
+        return 0
+    except Exception as e:
+        log.error("sideload failed: %s", e)
+        return 1
+

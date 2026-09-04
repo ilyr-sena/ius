@@ -59,6 +59,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_stream.add_argument("--no-launch", action="store_true", help="skip launching the probe app on device")
     p_stream.add_argument("--open", action="store_true", help="open the player in a browser")
 
+    p_sideload = sub.add_parser("sideload", help="sign and install an IPA onto the device over USB")
+    p_sideload.add_argument("ipa", help="path to unsigned or signed IPA")
+    p_sideload.add_argument("--udid", default=None, help="target device UDID")
+    p_sideload.add_argument("--bundle-id", default=None, help="override bundle ID")
+    p_sideload.add_argument("--renew", action="store_true", help="force profile renewal from Apple")
+    p_sideload.add_argument("--login", action="store_true", help="launch browser login to refresh session")
+    p_sideload.add_argument("--key", default=None, help="custom private key path (.pem/.p12)")
+    p_sideload.add_argument("--cert", default=None, help="custom certificate path (.pem)")
+
     return p
 
 
@@ -87,6 +96,9 @@ def main() -> int:
             case "stream":
                 from .commands import stream_cmd
                 return stream_cmd(cfg, args)
+            case "sideload":
+                from .commands import sideload_cmd
+                return sideload_cmd(cfg, args)
             case "tunnel":
                 from .commands import tunnel_cmd
                 return tunnel_cmd(cfg, args.pairs, args.udid)
