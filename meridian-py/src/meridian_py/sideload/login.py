@@ -70,16 +70,26 @@ def terminal_login(
 
             from findmy.reports.account import AsyncTrustedDeviceSecondFactor
             if isinstance(method, AsyncTrustedDeviceSecondFactor):
-                headers = {
-                    "security-code": code,
-                    "Content-Type": "text/x-xml-plist",
-                    "Accept": "text/x-xml-plist",
-                }
-                await acc._sms_2fa_request(
-                    "GET",
-                    acc._ENDPOINT_2FA_TD_SUBMIT,
-                    headers=headers,
-                )
+                # Standard Apple GSA Trusted Device 2FA verification endpoint
+                try:
+                    await acc._sms_2fa_request(
+                        "POST",
+                        "https://gsa.apple.com/auth/verify/trusteddevice/securitycode",
+                        data={"securityCode": {"code": code}},
+                    )
+                except Exception as e:
+                    # Fallback to validate query
+                    log.debug("trusteddevice/securitycode failed: %s — trying legacy validate", e)
+                    headers = {
+                        "security-code": code,
+                        "Content-Type": "text/x-xml-plist",
+                        "Accept": "text/x-xml-plist",
+                    }
+                    await acc._sms_2fa_request(
+                        "GET",
+                        acc._ENDPOINT_2FA_TD_SUBMIT,
+                        headers=headers,
+                    )
             else:
                 data = {
                     "phoneNumber": {"id": getattr(method, "_selected_phone_number_id", 1)},
@@ -213,15 +223,30 @@ def browser_login(session_file: Path) -> dict:
 
 
 def load_session(session_file: Path) -> Optional[dict]:
-    """Load previously saved GSA session if it exists."""
-    session_file = Path(session_file)
-    if not session_file.exists():
-        return None
-    try:
-        with session_file.open("r") as f:
-            data = json.load(f)
-        if isinstance(data, dict) and "raw_gsa" in data:
-            return data
-    except Exception as e:
-        log.warning("could not read saved session: %s", e)
+    """Load previously saved GSA session or sessions.json if it exists."""
+    for p in (session_file.parent / "sessions.json", session_file):
+        if not p.exists():
+            continue
+        try:
+            with p.open("r") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                latest = data.get("latest:a")
+                if latest and f"{latest}:a" in data:
+                    sess = data[f"{latest}:a"]
+                    gs = sess.get("gs_token")
+                    dsid = sess.get("dsid")
+                    if gs and dsid:
+                        return {
+                            "cookies": [{"name": "myacinfo", "value": gs, "domain": ".apple.com", "path": "/"}],
+                            "auth_headers": {
+                                "X-Apple-GS-Token": gs,
+                                "X-Apple-ADSID": dsid,
+                            },
+                            "raw_gsa": sess,
+                        }
+                if "raw_gsa" in data:
+                    return data
+        except Exception as e:
+            log.warning("could not read saved session from %s: %s", p, e)
     return None
