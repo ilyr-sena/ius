@@ -45,7 +45,11 @@ final class MJPEGStreamer {
     private struct Client {
         let conn: NWConnection
         let cfg: StreamConfig
-        var pendingBytes: Int        // owes the socket this much; reset when done
+
+        init(conn: NWConnection, cfg: StreamConfig) {
+            self.conn = conn
+            self.cfg = cfg
+        }
     }
 
     private let lock = NSLock()
