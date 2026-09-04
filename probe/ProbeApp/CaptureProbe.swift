@@ -107,8 +107,6 @@ final class CaptureProbe: NSObject, SCStreamDelegate, SCStreamOutput, SCContentS
                 let cfg = SCStreamConfiguration()
                 cfg.width = width
                 cfg.height = height
-                cfg.queueDepth = 2
-                cfg.minimumFrameInterval = CMTime(value: 1, timescale: 60)
 
                 let s = SCStream(filter: filter, configuration: cfg, delegate: self)
                 try s.addStreamOutput(self, type: .screen, sampleHandlerQueue: q)
