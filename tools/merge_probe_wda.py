@@ -139,7 +139,7 @@ def integrate(wda_dir: Path, probe_dir: Path) -> None:
     content = content[:ins_pos] + "\n".join(sources_entries) + "\n" + content[ins_pos:]
 
     # Add SWIFT_VERSION and settings to EEF988321C486604005CA669 (Debug) and EEF988331C486604005CA669 (Release)
-    swift_settings = "\n\t\t\t\tSWIFT_VERSION = 5.0;\n\t\t\t\tALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = YES;\n\t\t\t\tDEFINES_MODULE = YES;"
+    swift_settings = "\n\t\t\t\tSWIFT_VERSION = 5.0;\n\t\t\t\tALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = YES;\n\t\t\t\tDEFINES_MODULE = YES;\n\t\t\t\tIPHONEOS_DEPLOYMENT_TARGET = 18.0;"
     for cid in ["EEF988321C486604005CA669", "EEF988331C486604005CA669"]:
         marker = f"{cid} /* Debug */ = {{\n\t\t\tisa = XCBuildConfiguration;\n\t\t\tbaseConfigurationReference = EEE5CABF1C80361500CBBDD9 /* IOSSettings.xcconfig */;\n\t\t\tbuildSettings = {{"
         if marker not in content:

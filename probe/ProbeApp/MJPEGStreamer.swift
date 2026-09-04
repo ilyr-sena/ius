@@ -1,5 +1,6 @@
 import AVFoundation
 import CoreImage
+import Network
 import UIKit
 
 struct StreamConfig {

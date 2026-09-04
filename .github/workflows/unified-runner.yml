@@ -33,6 +33,7 @@ jobs:
             -destination 'generic/platform=iOS' \
             -configuration Debug \
             -derivedDataPath build \
+            IPHONEOS_DEPLOYMENT_TARGET=18.0 \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY=""
 
       - name: Ad-hoc sign app and nested bundles
