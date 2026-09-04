@@ -147,11 +147,13 @@ def integrate(wda_dir: Path, probe_dir: Path) -> None:
 
     log.info("4. Replacing app icon with custom Meridian design...")
     icon_path = runner_dir / "Assets.xcassets" / "AppIcon.appiconset" / "icon-1024.png"
-    asset_icon = probe_dir.parent / "Assets" / "icon-1024.png"
+    asset_icon = probe_dir.parent / "Assets" / "meridian-icon.png"
+    if not asset_icon.exists():
+        asset_icon = probe_dir.parent / "Assets" / "icon-1024.png"
     if asset_icon.exists():
         icon_path.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(asset_icon, icon_path)
-        log.info("✓ Copied pre-rendered Meridian icon to %s", icon_path)
+        log.info("✓ Copied custom Meridian icon to %s", icon_path)
     else:
         generate_meridian_icon(icon_path)
 

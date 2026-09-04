@@ -9,7 +9,7 @@ on:
 
 jobs:
   build:
-    runs-on: macos-15
+    runs-on: xcode-27
     steps:
       - uses: actions/checkout@v4
 
@@ -60,6 +60,10 @@ jobs:
           echo "Packaging $APP with Meridian branding..."
           plutil -replace CFBundleDisplayName -string "Meridian" "$APP/Info.plist"
           plutil -replace CFBundleName -string "Meridian" "$APP/Info.plist"
+          if [ -f "WebDriverAgentRunner/Assets.xcassets/AppIcon.appiconset/icon-1024.png" ]; then
+            cp "WebDriverAgentRunner/Assets.xcassets/AppIcon.appiconset/icon-1024.png" "$APP/AppIcon60x60@2x.png" || true
+            cp "WebDriverAgentRunner/Assets.xcassets/AppIcon.appiconset/icon-1024.png" "$APP/AppIcon76x76@2x~ipad.png" || true
+          fi
           mkdir -p Payload
           cp -R "$APP" Payload/
           zip -qry MeridianRunner-unsigned.ipa Payload
