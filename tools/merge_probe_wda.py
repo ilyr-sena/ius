@@ -33,8 +33,8 @@ PROBE_BRIDGE_SWIFT = """import Foundation
 
 @objc public final class ProbeBridge: NSObject {
     @objc public static func start() {
-        print("[MeridianRunner] Starting integrated ProbeOrchestrator on port 9100...")
-        ProbeOrchestrator.shared.start(port: 9100)
+        print("[MeridianRunner] Starting integrated ProbeOrchestrator on port 9200...")
+        ProbeOrchestrator.shared.start(port: 9200)
     }
 }
 """

@@ -24,7 +24,7 @@ class Config:
     # Daemon / endpoint
     mux_endpoint: str = "/var/run/usbmuxd"     # unix socket, or tcp://
     iproxy_ports: list[tuple[int, int]] = field(
-        default_factory=lambda: [(9100, 9100), (8100, 8100)]
+        default_factory=lambda: [(9200, 9200), (9100, 9100), (8100, 8100)]
     )
     tunneld_port: int = 49151
     http_port: int = 9001
@@ -39,8 +39,8 @@ class Config:
     log_level: str = "info"
 
     # Bundles
-    wda_bundle: str = "com.facebook.WebDriverAgentRunner.xctrunner.SRTHYBYH35"
-    probe_bundle: str = "dev.ius.probe.app.SRTHYBYH35"
+    wda_bundle: str = "dev.ius.meridian.runner.xctrunner.SRTHYBYH35"
+    probe_bundle: str = "dev.ius.meridian.runner.xctrunner.SRTHYBYH35"
 
     @classmethod
     def defaults(cls) -> "Config":
