@@ -188,18 +188,14 @@ def browser_login(session_file: Path) -> dict:
 
 
 def load_session(session_file: Path) -> Optional[dict]:
-    """Load previously saved cookies and auth headers if they exist."""
+    """Load previously saved GSA session if it exists."""
     session_file = Path(session_file)
     if not session_file.exists():
         return None
     try:
         with session_file.open("r") as f:
             data = json.load(f)
-        if isinstance(data, list):
-            data = {"cookies": data, "auth_headers": {}}
-        cookies = data.get("cookies", [])
-        names = {c.get("name") for c in cookies if isinstance(c, dict)}
-        if "myacinfo" in names:
+        if isinstance(data, dict) and "raw_gsa" in data:
             return data
     except Exception as e:
         log.warning("could not read saved session: %s", e)
