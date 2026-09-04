@@ -51,11 +51,12 @@ def init(level: int = logging.INFO) -> None:
 
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(_Formatter())
-    root = logging.getLogger("meridian")
-    root.handlers.clear()
-    root.addHandler(handler)
-    root.setLevel(level)
-    root.propagate = False
+    for name in ("meridian", "meridian_py"):
+        r = logging.getLogger(name)
+        r.handlers.clear()
+        r.addHandler(handler)
+        r.setLevel(level)
+        r.propagate = False
 
     # Quiet down the noisy channels.
     for noisy in ("uvicorn", "uvicorn.error", "uvicorn.access",

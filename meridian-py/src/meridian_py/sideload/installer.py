@@ -27,13 +27,10 @@ def install_ipa(
         async with await create_using_usbmux(serial=udid) as lockdown:
             svc = InstallationProxyService(lockdown=lockdown)
 
-            def _handler(status: dict):
-                pct = status.get("PercentComplete", 0)
-                msg = status.get("Status", "") or status.get("ErrorDescription", "")
-                if msg:
-                    log.info("install: %d%% — %s", pct, msg)
+            def _handler(pct: int, *args):
+                log.info("install: %s%% Complete", pct)
                 if progress_cb:
-                    progress_cb(pct, msg)
+                    progress_cb(pct, f"{pct}% Complete")
 
             log.info("transferring and installing %s onto device...", resolved_path.name)
             await svc.install_from_local(str(resolved_path), handler=_handler)

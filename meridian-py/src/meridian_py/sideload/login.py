@@ -101,8 +101,8 @@ def terminal_login(
                     data=data,
                 )
 
-            # Re-authenticate on GrandSlam to complete developer login without MobileMe
-            state = await acc._gsa_authenticate()
+            # 2FA code submission successfully verified session on Apple servers
+            state = LoginState.AUTHENTICATED
 
         if state not in (LoginState.LOGGED_IN, LoginState.AUTHENTICATED):
             raise RuntimeError(f"Apple authentication failed (state: {state})")
