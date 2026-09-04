@@ -67,7 +67,32 @@ def terminal_login(
             if hasattr(method, "request"):
                 await method.request()
             code = input("Enter 6-digit verification code sent to your Apple device: ").strip()
-            state = await method.submit(code)
+
+            from findmy.reports.account import AsyncTrustedDeviceSecondFactor
+            if isinstance(method, AsyncTrustedDeviceSecondFactor):
+                headers = {
+                    "security-code": code,
+                    "Content-Type": "text/x-xml-plist",
+                    "Accept": "text/x-xml-plist",
+                }
+                await acc._sms_2fa_request(
+                    "GET",
+                    acc._ENDPOINT_2FA_TD_SUBMIT,
+                    headers=headers,
+                )
+            else:
+                data = {
+                    "phoneNumber": {"id": getattr(method, "_selected_phone_number_id", 1)},
+                    "securityCode": {"code": code},
+                }
+                await acc._sms_2fa_request(
+                    "POST",
+                    acc._ENDPOINT_2FA_SMS_SUBMIT,
+                    data=data,
+                )
+
+            # Re-authenticate on GrandSlam to complete developer login without MobileMe
+            state = await acc._gsa_authenticate()
 
         if state not in (LoginState.LOGGED_IN, LoginState.AUTHENTICATED):
             raise RuntimeError(f"Apple authentication failed (state: {state})")
