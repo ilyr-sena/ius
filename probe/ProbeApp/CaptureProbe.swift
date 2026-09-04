@@ -6,7 +6,6 @@ import CoreVideo
 #if canImport(ScreenCaptureKit)
 import ScreenCaptureKit
 
-@available(iOS 18.0, *)
 final class CaptureProbe: NSObject, SCStreamDelegate, SCStreamOutput, SCContentSharingPickerObserver {
     static let pickerTimeoutSeconds: Int = 120
 
