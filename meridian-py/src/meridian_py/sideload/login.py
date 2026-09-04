@@ -14,6 +14,38 @@ TARGET_URL = "https://developer.apple.com/account/"
 PROFILE_DIR = Path.home() / ".local" / "state" / "meridian" / "browser_profile"
 
 
+ANISETTE_DIR = Path("/home/sooku/Documents/Dev/ius/tools/anisette")
+
+
+def ensure_anisette_server(port: int = 6969) -> str:
+    """Ensure local omnisette-server is running on port."""
+    import socket
+    import subprocess
+
+    with socket.socket() as s:
+        s.settimeout(0.3)
+        if s.connect_ex(("127.0.0.1", port)) == 0:
+            return f"http://127.0.0.1:{port}"
+
+    server_bin = ANISETTE_DIR / "omnisette-server"
+    if server_bin.exists():
+        log.info("starting local omnisette-server on :%d...", port)
+        subprocess.Popen(
+            [str(server_bin), "--ip", "127.0.0.1", "--http-port", str(port)],
+            cwd=str(ANISETTE_DIR),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        for _ in range(25):
+            time.sleep(0.3)
+            with socket.socket() as s:
+                s.settimeout(0.3)
+                if s.connect_ex(("127.0.0.1", port)) == 0:
+                    log.info("local omnisette-server ready on :%d", port)
+                    return f"http://127.0.0.1:{port}"
+    return f"http://127.0.0.1:{port}"
+
+
 def terminal_login(
     session_file: Path,
     email: Optional[str] = None,
@@ -22,7 +54,7 @@ def terminal_login(
     """Authenticates to Apple directly in the terminal with 2FA prompt using GrandSlam."""
     import asyncio
     import getpass
-    from findmy import AsyncAppleAccount, LocalAnisetteProvider, LoginState
+    from findmy import AsyncAppleAccount, RemoteAnisetteProvider, LoginState
 
     session_file = Path(session_file)
     session_file.parent.mkdir(parents=True, exist_ok=True)
@@ -39,7 +71,8 @@ def terminal_login(
     captured_state: dict = {}
 
     async def _do_login():
-        ani = LocalAnisetteProvider()
+        ani_url = ensure_anisette_server(6969)
+        ani = RemoteAnisetteProvider(ani_url)
         acc = AsyncAppleAccount(ani)
 
         orig_set_state = type(acc)._set_login_state
@@ -105,9 +138,11 @@ def terminal_login(
             state = LoginState.AUTHENTICATED
 
         if state not in (LoginState.LOGGED_IN, LoginState.AUTHENTICATED):
+            await acc.close()
             raise RuntimeError(f"Apple authentication failed (state: {state})")
 
         print("✓ Authentication successful!")
+        await acc.close()
         return captured_state
 
     state_data = asyncio.run(_do_login())
