@@ -217,7 +217,7 @@ class ProfileManager:
         cert_der = cert_der_from_pem(cert_path.read_bytes()) if cert_path and cert_path.exists() else None
 
         # 2. Check if we have an active profile matching key+cert
-        if not force_renew and key_path and cert_path and cert_der:
+        if not force_renew and not force_login and key_path and cert_path and cert_der:
             cached = self.find_cached_profile(bundle_id, cert_der=cert_der)
             if cached:
                 return key_path, cert_path, cached, team_id
