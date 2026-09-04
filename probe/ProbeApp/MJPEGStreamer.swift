@@ -45,6 +45,7 @@ final class MJPEGStreamer {
     private struct Client {
         let conn: NWConnection
         let cfg: StreamConfig
+        var pendingBytes: Int        // owes the socket this much; reset when done
     }
 
     private let lock = NSLock()
@@ -53,6 +54,12 @@ final class MJPEGStreamer {
     private var lastSent: [String: DispatchTime] = [:]
     private var lastConfig = MJPEGStreamer.loadPersisted()
     private let ciContext = CIContext()
+    /// Per-connection bytes in flight, used to impose backpressure caps.
+    private var pendingBytesByConn: [ObjectIdentifier: Int] = [:]
+
+    /// Absolute ceiling on bytes buffered for one slow client before we
+    /// stop feeding it (prevents jetsam/OOM kill).
+    private static let maxPendingBytes = 4 * 1024 * 1024
 
     var hasViewers: Bool {
         lock.lock(); defer { lock.unlock() }
@@ -106,12 +113,31 @@ final class MJPEGStreamer {
     private func remove(_ conn: NWConnection) {
         lock.lock()
         clients.removeAll { $0.conn === conn }
+        pendingBytesByConn.removeValue(forKey: ObjectIdentifier(conn))
         let n = clients.count
         lock.unlock()
         print("[ius] browser viewer disconnected (\(n) total)")
     }
 
+    /// True if we can queue `bytes` more bytes to this connection right now.
+    private func canSend(to conn: NWConnection, bytes: Int) -> Bool {
+        let key = ObjectIdentifier(conn)
+        return (pendingBytesByConn[key] ?? 0) + bytes <= Self.maxPendingBytes
+    }
+
+    private func trackSend(_ conn: NWConnection, bytes: Int) {
+        let key = ObjectIdentifier(conn)
+        pendingBytesByConn[key] = (pendingBytesByConn[key] ?? 0) + bytes
+    }
+
+    private func trackFlush(_ conn: NWConnection, bytes: Int) {
+        let key = ObjectIdentifier(conn)
+        pendingBytesByConn[key] = max(0, (pendingBytesByConn[key] ?? 0) - bytes)
+    }
+
     /// Called from the SCK sample callback.
+    /// Memory-safe conversion: frames are braided through a *bound* work queue,
+    /// so clients that stall can't pile allocations onto the heap.
     func publish(sampleBuffer: CMSampleBuffer) {
         guard hasViewers else { return }
 
@@ -182,7 +208,22 @@ final class MJPEGStreamer {
                 payload.append(Data("\r\n".utf8))
 
                 for c in group.conns where c.state == .ready {
-                    c.send(content: payload, completion: .contentProcessed { _ in })
+                    self.lock.lock()
+                    let fits = self.canSend(to: c, bytes: payload.count)
+                    if fits { self.trackSend(c, bytes: payload.count) }
+                    self.lock.unlock()
+                    if !fits {
+                        continue   // drop frame for slow viewers -- cap protects the process
+                    }
+                    let frameSize = payload.count
+                    c.send(
+                        content: payload,
+                        completion: .contentProcessed { [weak self] _ in
+                            self?.lock.lock()
+                            self?.trackFlush(c, bytes: frameSize)
+                            self?.lock.unlock()
+                        }
+                    )
                 }
             }
         }
