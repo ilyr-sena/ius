@@ -44,6 +44,10 @@ class DeveloperServicesClient:
                     domain=c.get("domain", ".apple.com"),
                     path=c.get("path", "/"),
                 )
+        if isinstance(cookies, dict):
+            for k, v in cookies.get("auth_headers", {}).items():
+                self.http.headers[k] = v
+
         if not self.myacinfo:
             raise ValueError("cookies list does not contain myacinfo session token")
 
@@ -55,13 +59,16 @@ class DeveloperServicesClient:
         return ""
 
     def _headers(self) -> dict[str, str]:
-        return {
+        h = {
             "User-Agent": "Xcode",
             "X-Apple-Widget-Key": APP_ID_KEY,
             "Content-Type": "text/x-xml-plist",
             "Accept": "text/x-xml-plist",
             "Origin": "https://developer.apple.com",
         }
+        for k, v in self.http.headers.items():
+            h[k] = v
+        return h
 
     def call(self, action: str, team_id: str = "", **extra: Any) -> dict[str, Any]:
         """Send an action request to developerservices2."""
@@ -81,7 +88,12 @@ class DeveloperServicesClient:
         resp = self.http.post(url, data=body, headers=self._headers(), timeout=30)
         resp.raise_for_status()
 
-        data = plistlib.loads(resp.content)
+        if resp.content.strip().startswith(b"{"):
+            import json as _json
+            data = _json.loads(resp.content)
+        else:
+            data = plistlib.loads(resp.content)
+
         code = data.get("resultCode", 0)
         if code != 0:
             err_msg = data.get("errorMessage", "Unknown error")

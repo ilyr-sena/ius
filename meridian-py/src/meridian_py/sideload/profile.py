@@ -15,7 +15,7 @@ from cryptography import x509
 from cryptography.hazmat.primitives import serialization
 from cryptography.x509.oid import NameOID
 
-from .login import browser_login, load_session
+from .login import browser_login, load_session, terminal_login
 from .provision import (
     DeveloperServicesClient,
     DeveloperServicesError,
@@ -199,6 +199,9 @@ class ProfileManager:
         force_login: bool = False,
         custom_key: Optional[Path] = None,
         custom_cert: Optional[Path] = None,
+        apple_id: Optional[str] = None,
+        password: Optional[str] = None,
+        use_browser: bool = False,
     ) -> tuple[Path, Path, Path, str]:
         """Ensure valid key, cert, profile, and team_id exist for this bundle_id."""
         key_path = custom_key
@@ -226,19 +229,26 @@ class ProfileManager:
         # 3. Need to mint fresh credentials or profile via Apple Developer Services
         log.info("provisioning fresh profile for %s (team %s)...", bundle_id, team_id)
         session_cookies = None
-        if not force_login:
+        if not force_login and not force_renew:
             session_cookies = load_session(SESSION_FILE)
 
         if not session_cookies:
-            session_cookies = browser_login(SESSION_FILE)
+            if use_browser:
+                session_cookies = browser_login(SESSION_FILE)
+            else:
+                try:
+                    session_cookies = terminal_login(SESSION_FILE, email=apple_id, password=password)
+                except Exception as e:
+                    log.warning("terminal login failed (%s) — falling back to browser login...", e)
+                    session_cookies = browser_login(SESSION_FILE)
 
         client = DeveloperServicesClient(session_cookies)
         try:
             team_id = client.get_team_id()
         except DeveloperServicesError as e:
-            if e.code == 1100:
-                log.info("saved session expired on Apple servers, launching browser login...")
-                session_cookies = browser_login(SESSION_FILE)
+            if e.code in (1100, 3018, 3050):
+                log.info("saved session expired on Apple servers, re-authenticating...")
+                session_cookies = terminal_login(SESSION_FILE, email=apple_id, password=password)
                 client = DeveloperServicesClient(session_cookies)
                 team_id = client.get_team_id()
             else:

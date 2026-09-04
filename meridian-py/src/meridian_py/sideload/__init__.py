@@ -35,6 +35,9 @@ def sideload_app(
     force_login: bool = False,
     custom_key: Optional[Path] = None,
     custom_cert: Optional[Path] = None,
+    apple_id: Optional[str] = None,
+    password: Optional[str] = None,
+    use_browser: bool = False,
 ) -> str:
     """Full end-to-end pipeline: resolve profile -> sign nested -> install over USB."""
     in_path = Path(ipa_path).resolve()
@@ -80,6 +83,9 @@ def sideload_app(
         force_login=force_login,
         custom_key=custom_key,
         custom_cert=custom_cert,
+        apple_id=apple_id,
+        password=password,
+        use_browser=use_browser,
     )
 
     # 3. Sign IPA with zsign (recursively handles nested .xctest / .framework)

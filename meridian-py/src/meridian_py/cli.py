@@ -63,8 +63,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_sideload.add_argument("ipa", help="path to unsigned or signed IPA")
     p_sideload.add_argument("--udid", default=None, help="target device UDID")
     p_sideload.add_argument("--bundle-id", default=None, help="override bundle ID")
+    p_sideload.add_argument("--apple-id", default=None, help="Apple ID email")
+    p_sideload.add_argument("--password", default=None, help="Apple ID password")
+    p_sideload.add_argument("--browser", action="store_true", help="use Chrome window instead of terminal login")
     p_sideload.add_argument("--renew", action="store_true", help="force profile renewal from Apple")
-    p_sideload.add_argument("--login", action="store_true", help="launch browser login to refresh session")
+    p_sideload.add_argument("--login", action="store_true", help="re-authenticate with Apple")
     p_sideload.add_argument("--key", default=None, help="custom private key path (.pem/.p12)")
     p_sideload.add_argument("--cert", default=None, help="custom certificate path (.pem)")
 

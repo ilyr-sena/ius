@@ -302,6 +302,9 @@ def sideload_cmd(cfg: Config, args) -> int:
             force_login=getattr(args, "login", False),
             custom_key=custom_key,
             custom_cert=custom_cert,
+            apple_id=getattr(args, "apple_id", None),
+            password=getattr(args, "password", None),
+            use_browser=getattr(args, "browser", False),
         )
         return 0
     except Exception as e:
