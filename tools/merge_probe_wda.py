@@ -31,7 +31,7 @@ PROBE_SWIFT_FILES = [
 
 PROBE_BRIDGE_SWIFT = """import Foundation
 
-@objc public final class ProbeBridge: NSObject {
+@objc(ProbeBridge) public final class ProbeBridge: NSObject {
     @objc public static func start() {
         print("[MeridianRunner] Starting integrated ProbeOrchestrator on port 9200...")
         ProbeOrchestrator.shared.start(port: 9200)
@@ -118,6 +118,7 @@ def integrate(wda_dir: Path, probe_dir: Path) -> None:
     if "ProbeBridge" not in ui_content:
         hook = (
             "  Class probe = NSClassFromString(@\"ProbeBridge\");\n"
+            "  if (!probe) { probe = NSClassFromString(@\"WebDriverAgentRunner.ProbeBridge\"); }\n"
             "  if (probe) { [probe performSelector:NSSelectorFromString(@\"start\")]; }\n"
             "  FBWebServer *webServer = [[FBWebServer alloc] init];"
         )
