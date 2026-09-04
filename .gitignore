@@ -7,3 +7,8 @@ DerivedData/
 target/
 8100/
 9100/
+8100
+9100
+*.egg-info/
+tools/anisette/
+uv.lock

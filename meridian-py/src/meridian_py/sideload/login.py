@@ -51,16 +51,15 @@ def terminal_login(
     email: Optional[str] = None,
     password: Optional[str] = None,
 ) -> dict:
-    """Authenticates to Apple directly in the terminal with 2FA prompt using GrandSlam."""
-    import asyncio
+    """Authenticates to Apple directly in the terminal with 2FA prompt using GrandSlam for Xcode."""
     import getpass
-    from findmy import AsyncAppleAccount, RemoteAnisetteProvider, LoginState
+    from .gsa import GSAClient
 
     session_file = Path(session_file)
     session_file.parent.mkdir(parents=True, exist_ok=True)
 
     print("\n" + "═" * 60)
-    print("  Apple ID Terminal Login")
+    print("  Apple ID Terminal Login (Xcode Developer Services)")
     print("═" * 60)
 
     if not email:
@@ -68,99 +67,8 @@ def terminal_login(
     if not password:
         password = getpass.getpass("Apple ID password: ")
 
-    captured_state: dict = {}
-
-    async def _do_login():
-        ani_url = ensure_anisette_server(6969)
-        ani = RemoteAnisetteProvider(ani_url)
-        acc = AsyncAppleAccount(ani)
-
-        orig_set_state = type(acc)._set_login_state
-
-        def spying_set_login_state(self, state, data=None):
-            if data:
-                captured_state.update(data)
-            return orig_set_state(self, state, data)
-
-        type(acc)._set_login_state = spying_set_login_state
-
-        state = await acc.login(email, password)
-        if state == LoginState.REQUIRE_2FA:
-            print("\n[*] Two-factor authentication required.")
-            methods = await acc.get_2fa_methods()
-            method = methods[0]
-            if len(methods) > 1:
-                for i, m in enumerate(methods):
-                    print(f"  [{i}] {type(m).__name__}")
-                try:
-                    idx = int(input("Choose 2FA method [0]: ") or "0")
-                    method = methods[idx]
-                except Exception:
-                    method = methods[0]
-            if hasattr(method, "request"):
-                await method.request()
-            code = input("Enter 6-digit verification code sent to your Apple device: ").strip()
-
-            from findmy.reports.account import AsyncTrustedDeviceSecondFactor
-            if isinstance(method, AsyncTrustedDeviceSecondFactor):
-                # Standard Apple GSA Trusted Device 2FA verification endpoint
-                try:
-                    await acc._sms_2fa_request(
-                        "POST",
-                        "https://gsa.apple.com/auth/verify/trusteddevice/securitycode",
-                        data={"securityCode": {"code": code}},
-                    )
-                except Exception as e:
-                    # Fallback to validate query
-                    log.debug("trusteddevice/securitycode failed: %s — trying legacy validate", e)
-                    headers = {
-                        "security-code": code,
-                        "Content-Type": "text/x-xml-plist",
-                        "Accept": "text/x-xml-plist",
-                    }
-                    await acc._sms_2fa_request(
-                        "GET",
-                        acc._ENDPOINT_2FA_TD_SUBMIT,
-                        headers=headers,
-                    )
-            else:
-                data = {
-                    "phoneNumber": {"id": getattr(method, "_selected_phone_number_id", 1)},
-                    "securityCode": {"code": code},
-                }
-                await acc._sms_2fa_request(
-                    "POST",
-                    acc._ENDPOINT_2FA_SMS_SUBMIT,
-                    data=data,
-                )
-
-            # 2FA code submission successfully verified session on Apple servers
-            state = LoginState.AUTHENTICATED
-
-        if state not in (LoginState.LOGGED_IN, LoginState.AUTHENTICATED):
-            await acc.close()
-            raise RuntimeError(f"Apple authentication failed (state: {state})")
-
-        print("✓ Authentication successful!")
-        await acc.close()
-        return captured_state
-
-    state_data = asyncio.run(_do_login())
-
-    adsid = state_data.get("adsid", "")
-    pet = state_data.get("idms_pet", "") or state_data.get("idms_token", "")
-    dsid = str(state_data.get("dsid", ""))
-
-    session_data = {
-        "cookies": [
-            {"name": "myacinfo", "value": pet, "domain": ".apple.com", "path": "/"}
-        ],
-        "auth_headers": {
-            "X-Apple-ADSID": adsid,
-            "X-Apple-ID-DSID": dsid,
-        },
-        "raw_gsa": state_data,
-    }
+    client = GSAClient(username=email)
+    session_data = client.authenticate(password)
 
     with session_file.open("w") as f:
         json.dump(session_data, f, indent=2)
@@ -280,6 +188,8 @@ def load_session(session_file: Path) -> Optional[dict]:
                             },
                             "raw_gsa": sess,
                         }
+                if "authToken" in data:
+                    return data
                 if "raw_gsa" in data:
                     return data
         except Exception as e:

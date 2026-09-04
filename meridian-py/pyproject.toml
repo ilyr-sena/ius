@@ -15,6 +15,7 @@ dependencies = [
 ]
 
 [project.scripts]
+meridian = "meridian_py.cli:main"
 meridian-py = "meridian_py.cli:main"
 
 [tool.setuptools.packages.find]

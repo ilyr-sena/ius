@@ -15,6 +15,8 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
 
+from .ca import get_apple_ca_bundle_path
+
 log = logging.getLogger(__name__)
 
 CLIENT_ID = "XABBG36SBA"
@@ -33,23 +35,30 @@ class DeveloperServicesError(Exception):
 class DeveloperServicesClient:
     """Speaks the developerservices2 protocol to mint certificates and profiles."""
 
-    def __init__(self, cookies: list[dict] | dict):
+    def __init__(self, session_data: list[dict] | dict):
         self.http = requests.Session()
-        cookie_list = cookies["cookies"] if isinstance(cookies, dict) and "cookies" in cookies else cookies
-        for c in cookie_list:
-            if isinstance(c, dict) and "name" in c and "value" in c:
-                self.http.cookies.set(
-                    c["name"],
-                    c["value"],
-                    domain=c.get("domain", ".apple.com"),
-                    path=c.get("path", "/"),
-                )
-        if isinstance(cookies, dict):
-            for k, v in cookies.get("auth_headers", {}).items():
-                self.http.headers[k] = v
+        self.http.verify = get_apple_ca_bundle_path()
+        self.auth_token: Optional[str] = None
+        self.dsid: Optional[str] = None
+        self.anisette: dict[str, str] = {}
 
-        if not self.myacinfo:
-            raise ValueError("cookies list does not contain myacinfo session token")
+        if isinstance(session_data, dict) and "authToken" in session_data:
+            self.auth_token = session_data["authToken"]
+            self.dsid = str(session_data.get("dsid", ""))
+            self.anisette = session_data.get("anisette", {})
+        else:
+            cookie_list = session_data["cookies"] if isinstance(session_data, dict) and "cookies" in session_data else session_data
+            for c in cookie_list:
+                if isinstance(c, dict) and "name" in c and "value" in c:
+                    self.http.cookies.set(
+                        c["name"],
+                        c["value"],
+                        domain=c.get("domain", ".apple.com"),
+                        path=c.get("path", "/"),
+                    )
+            if isinstance(session_data, dict):
+                for k, v in session_data.get("auth_headers", {}).items():
+                    self.http.headers[k] = v
 
     @property
     def myacinfo(self) -> str:
@@ -59,6 +68,33 @@ class DeveloperServicesClient:
         return ""
 
     def _headers(self) -> dict[str, str]:
+        if self.auth_token:
+            ani = dict(self.anisette)
+            try:
+                r = requests.get("http://127.0.0.1:6969", timeout=2)
+                if r.ok:
+                    fresh = r.json()
+                    ani["X-Apple-I-Client-Time"] = fresh.get("X-Apple-I-Client-Time", ani.get("X-Apple-I-Client-Time", ""))
+                    if "X-Apple-I-MD-M" in fresh:
+                        ani["X-Apple-I-MD-M"] = fresh["X-Apple-I-MD-M"]
+                    if "X-Apple-I-MD" in fresh:
+                        ani["X-Apple-I-MD"] = fresh["X-Apple-I-MD"]
+            except Exception:
+                pass
+
+            h = {
+                "Content-Type": "text/x-xml-plist",
+                "User-Agent": "Xcode",
+                "Accept": "text/x-xml-plist",
+                "Accept-Language": "en-us",
+                "X-Apple-App-Info": "com.apple.gs.xcode.auth",
+                "X-Xcode-Version": "11.2 (11B41)",
+                "X-Apple-I-Identity-Id": str(self.dsid),
+                "X-Apple-GS-Token": str(self.auth_token),
+                **ani,
+            }
+            return h
+
         h = {
             "User-Agent": "Xcode",
             "X-Apple-Widget-Key": APP_ID_KEY,
@@ -72,13 +108,13 @@ class DeveloperServicesClient:
 
     def call(self, action: str, team_id: str = "", **extra: Any) -> dict[str, Any]:
         """Send an action request to developerservices2."""
-        payload = {
+        payload: dict[str, Any] = {
             "clientId": CLIENT_ID,
-            "myacinfo": self.myacinfo,
             "protocolVersion": "QH65B2",
             "requestId": str(uuid.uuid4()).upper(),
-            "userLocale": "en_US",
         }
+        if not self.auth_token:
+            payload["myacinfo"] = self.myacinfo
         if team_id:
             payload["teamId"] = team_id
         payload.update(extra)
@@ -92,7 +128,14 @@ class DeveloperServicesClient:
             import json as _json
             data = _json.loads(resp.content)
         else:
-            data = plistlib.loads(resp.content)
+            try:
+                data = plistlib.loads(resp.content)
+            except plistlib.InvalidFileException:
+                header = (
+                    b"<?xml version='1.0' encoding='UTF-8'?>\n"
+                    b"<!DOCTYPE plist PUBLIC '-//Apple//DTD PLIST 1.0//EN' 'http://www.apple.com/DTDs/PropertyList-1.0.dtd'>\n"
+                )
+                data = plistlib.loads(header + resp.content.strip())
 
         code = data.get("resultCode", 0)
         if code != 0:
@@ -104,7 +147,10 @@ class DeveloperServicesClient:
     def list_teams(self) -> list[dict[str, Any]]:
         """List developer teams associated with this Apple account."""
         data = self.call("listTeams")
-        return data.get("teams", [])
+        teams = data.get("teams", [])
+        if not teams and "myTeam" in data:
+            teams = [data["myTeam"]]
+        return teams
 
     def get_team_id(self, fallback: str = "SRTHYBYH35") -> str:
         """Get the primary team ID, falling back to personal team ID on free accounts."""
@@ -125,11 +171,17 @@ class DeveloperServicesClient:
                 return dev["deviceId"]
 
         log.info("registering device %s (%s) on developer account...", udid, device_name)
-        data = self.call("ios/addDevice", team_id, deviceNumber=udid, name=device_name)
-        dev = data.get("device")
-        if dev and dev.get("deviceId"):
+        data = self.call(
+            "ios/addDevice",
+            team_id,
+            deviceNumber=udid,
+            name=device_name,
+            DTDK_Platform="ios",
+        )
+        dev = data.get("device") or {}
+        if dev.get("deviceId"):
             return dev["deviceId"]
-        raise RuntimeError(f"addDevice failed: {data}")
+        return udid
 
     def list_certs(self, team_id: str) -> list[dict[str, Any]]:
         data = self.call("ios/listAllDevelopmentCerts", team_id)
@@ -137,11 +189,17 @@ class DeveloperServicesClient:
 
     def submit_csr(self, team_id: str, csr_pem: str) -> tuple[str, bytes]:
         """Submit a CSR to Apple and receive a signed development certificate."""
-        data = self.call("ios/submitDevelopmentCSR", team_id, csrContent=csr_pem)
+        data = self.call(
+            "ios/submitDevelopmentCSR",
+            team_id,
+            csrContent=csr_pem,
+            machineId=str(uuid.uuid4()).upper(),
+            machineName="MacBook Pro",
+        )
         req = data.get("certRequest") or {}
         cert_id = req.get("certificateId", "")
         content = req.get("certContent")
-        raw_cert = bytes(content) if isinstance(content, plistlib.Data) else content
+        raw_cert = bytes(content) if content else b""
         return cert_id, raw_cert
 
     def revoke_cert(self, team_id: str, cert_id: str, serial: str = "") -> None:
@@ -164,14 +222,27 @@ class DeveloperServicesClient:
             "ios/addAppId",
             team_id,
             identifier=bundle_id,
-            entitlements=[],
-            appIdName=name,
             name=name,
         )
         app = data.get("appId") or {}
         if not app.get("appIdId"):
             raise RuntimeError(f"addAppId failed: {data}")
         return app["appIdId"]
+
+    def download_team_profile(self, team_id: str, app_id_id: str) -> bytes:
+        """Download the active 7-day development provisioning profile for an App ID."""
+        data = self.call(
+            "ios/downloadTeamProvisioningProfile",
+            team_id,
+            appIdId=app_id_id,
+            DTDK_Platform="ios",
+        )
+        prof = data.get("provisioningProfile") or {}
+        content = prof.get("encodedProfile")
+        raw = bytes(content) if content else b""
+        if not raw:
+            raise RuntimeError(f"Apple returned empty profile: {data}")
+        return raw
 
     def create_or_regen_profile(
         self,
@@ -182,6 +253,11 @@ class DeveloperServicesClient:
         profile_name: str,
     ) -> bytes:
         """Create or regenerate a 7-day development provisioning profile."""
+        try:
+            return self.download_team_profile(team_id, app_id_id)
+        except Exception as e:
+            log.debug("downloadTeamProvisioningProfile fallback: %s", e)
+
         payload = {
             "appIdId": app_id_id,
             "deviceIds": [device_id],
@@ -196,7 +272,7 @@ class DeveloperServicesClient:
                 prof = data.get("provisioningProfile")
                 if prof and prof.get("encodedProfile"):
                     content = prof["encodedProfile"]
-                    raw = bytes(content) if isinstance(content, plistlib.Data) else content
+                    raw = bytes(content) if content else b""
                     return raw
             except DeveloperServicesError as e:
                 log.debug("%s returned %s — trying next", action, e)

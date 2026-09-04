@@ -7,8 +7,8 @@ use tracing::{debug, info, warn};
 
 use super::mux::{
     ConnState, ConnectionManager, ConnectionEvent, DeviceState,
-    build_version_request, build_setup_packet, build_tcp_packet, build_control_packet,
-    parse_packet, scaled_window, MuxPacket, TCP_SYN, TCP_ACK, INITIAL_WINDOW,
+    build_version_request, build_setup_packet, build_tcp_packet,
+    parse_packet, parse_mux_header, scaled_window, MuxPacket, TCP_SYN, TCP_ACK, INITIAL_WINDOW,
 };
 use super::usb::{AppleMuxInterface, UsbReader};
 use super::mux::PacketReassembler;
@@ -166,7 +166,7 @@ impl DeviceManager {
 
         self.conn_mgr.add_device(dev.device_id).await;
 
-        let version_pkt = build_version_request(0, 0xFFFF);
+        let version_pkt = build_version_request();
         if let Err(e) = usb.send(&version_pkt) {
             warn!("failed to send version request for device {}: {e}", dev.device_id);
         } else {
@@ -197,6 +197,7 @@ impl DeviceManager {
                     result = usb_rx.recv() => {
                         match result {
                             Some(raw_data) => {
+                                info!("usb_rx {} bytes: {:02x?}", raw_data.len(), &raw_data[..raw_data.len().min(96)]);
                                 metrics.usb_rx_bytes.fetch_add(raw_data.len() as u64, Ordering::Relaxed);
                                 for packet_data in reassembler.feed(&raw_data) {
                                     Self::process_device_packet(
@@ -333,18 +334,29 @@ impl DeviceManager {
                 return;
             }
             let free = max_conn_buffer.saturating_sub(conn.ib_buf.len());
-            build_tcp_packet(
-                device.version,
-                device.tx_seq,
-                device.rx_seq,
-                sport,
-                conn.dest_port,
-                conn.tx_seq,
-                conn.tx_ack,
-                TCP_ACK,
-                scaled_window(free),
-                None,
-            )
+            if device.version >= 2 {
+                build_tcp_packet(
+                    Some((device.tx_seq, device.rx_seq)),
+                    sport,
+                    conn.dest_port,
+                    conn.tx_seq,
+                    conn.tx_ack,
+                    TCP_ACK,
+                    scaled_window(free),
+                    None,
+                )
+            } else {
+                build_tcp_packet(
+                    None,
+                    sport,
+                    conn.dest_port,
+                    conn.tx_seq,
+                    conn.tx_ack,
+                    TCP_ACK,
+                    scaled_window(free),
+                    None,
+                )
+            }
         };
 
         metrics.usb_tx_bytes.fetch_add(pkt.len() as u64, Ordering::Relaxed);
@@ -393,6 +405,7 @@ impl DeviceManager {
 
         match packet {
             MuxPacket::Version { major, minor } => {
+                debug!("TRACE device {device_id} got VERSION {major}.{minor}");
                 info!("device {device_id} version response: {major}.{minor}");
                 if major >= 2 {
                     let setup_pkt = build_setup_packet(0, 0xFFFF);
@@ -413,17 +426,6 @@ impl DeviceManager {
                     device.state = DeviceState::Active;
                     device.tx_seq = 1;
                 }
-
-                let win_pkt = build_control_packet(
-                    if major >= 2 { 2 } else { 1 },
-                    0, 0xFFFF,
-                    &build_device_capabilities(),
-                );
-                if let Err(e) = usb.send(&win_pkt) {
-                    warn!("failed to send WIN for device {device_id}: {e}");
-                } else {
-                    debug!("sent WIN capabilities for device {device_id}");
-                }
             }
 
             MuxPacket::Control { payload } => {
@@ -442,6 +444,15 @@ impl DeviceManager {
             }
 
             MuxPacket::Tcp { header, payload } => {
+                // Track rx_seq peer value for future v2 frames.
+                if let Ok(hdr) = parse_mux_header(data) {
+                    if hdr.is_v2 {
+                        let mut devices = conn_mgr.devices.write().await;
+                        if let Some(d) = devices.get_mut(&device_id) {
+                            d.rx_seq = hdr.rx_seq;
+                        }
+                    }
+                }
                 let (events, send_queue) = conn_mgr.handle_tcp_packet(device_id, &header, &payload, metrics, max_conn_buffer).await;
                 for pkt in send_queue {
                     metrics.usb_tx_bytes.fetch_add(pkt.len() as u64, Ordering::Relaxed);
@@ -509,9 +520,7 @@ impl DeviceManager {
             let win = (INITIAL_WINDOW >> 8) as u16;
 
             let pkt = build_tcp_packet(
-                device.version,
-                device.tx_seq,
-                device.rx_seq,
+                if device.version >= 2 { Some((device.tx_seq, device.rx_seq)) } else { None },
                 sport,
                 conn.dest_port,
                 tcp_seq,
@@ -557,39 +566,40 @@ impl DeviceManager {
             }
         };
 
-        let devices = conn_mgr.devices.read().await;
-        let device = match devices.get(&req.device_id) {
-            Some(d) => d,
-            None => {
-                metrics.connect_failures.fetch_add(1, Ordering::Relaxed);
-                let _ = req.resp_tx.send(Err("device not found".into()));
-                return;
-            }
+        let syn_pkt = {
+            let mut devices = conn_mgr.devices.write().await;
+            let device = match devices.get_mut(&req.device_id) {
+                Some(d) => d,
+                None => {
+                    metrics.connect_failures.fetch_add(1, Ordering::Relaxed);
+                    let _ = req.resp_tx.send(Err("device not found".into()));
+                    return;
+                }
+            };
+
+            let conn = match device.connections.get(&sport) {
+                Some(c) => c,
+                None => {
+                    metrics.connect_failures.fetch_add(1, Ordering::Relaxed);
+                    let _ = req.resp_tx.send(Err("connection not found".into()));
+                    return;
+                }
+            };
+
+            let pkt = build_tcp_packet(
+                if device.version >= 2 { Some((device.tx_seq, device.rx_seq)) } else { None },
+                sport,
+                conn.dest_port,
+                0,
+                0,
+                TCP_SYN,
+                (INITIAL_WINDOW >> 8) as u16,
+                None,
+            );
+            // v2 frames count packets per direction; bump after every send.
+            if device.version >= 2 { device.tx_seq = device.tx_seq.wrapping_add(1); }
+            pkt
         };
-
-        let conn = match device.connections.get(&sport) {
-            Some(c) => c,
-            None => {
-                metrics.connect_failures.fetch_add(1, Ordering::Relaxed);
-                let _ = req.resp_tx.send(Err("connection not found".into()));
-                return;
-            }
-        };
-
-        let syn_pkt = build_tcp_packet(
-            device.version,
-            device.tx_seq,
-            device.rx_seq,
-            sport,
-            conn.dest_port,
-            0,
-            0,
-            TCP_SYN,
-            (INITIAL_WINDOW >> 8) as u16,
-            None,
-        );
-
-        drop(devices);
 
         if let Err(e) = usb.send(&syn_pkt) {
             metrics.connect_failures.fetch_add(1, Ordering::Relaxed);
@@ -677,24 +687,6 @@ impl DeviceManager {
 
         resp_rx.await.map_err(|e| format!("channel recv failed: {e}"))?
     }
-}
-
-fn build_device_capabilities() -> Vec<u8> {
-    let mut caps = plist::Dictionary::new();
-    caps.insert("AllowsSimulators".into(), plist::Value::Boolean(false));
-    caps.insert("SupportsLockdown".into(), plist::Value::Boolean(true));
-    caps.insert("SupportsPairing".into(), plist::Value::Boolean(true));
-    caps.insert("SupportsSSL".into(), plist::Value::Boolean(true));
-
-    let mut features = plist::Dictionary::new();
-    features.insert("com.apple.mobiledevice_proxy".into(), plist::Value::Integer(0.into()));
-    caps.insert("FeatureSet".into(), plist::Value::Dictionary(features));
-
-    let mut buf = Vec::new();
-    if let Err(e) = plist::to_writer_xml(&mut buf, &plist::Value::Dictionary(caps)) {
-        tracing::error!("failed to serialize device capabilities: {e}");
-    }
-    buf
 }
 
 impl Default for DeviceManager {

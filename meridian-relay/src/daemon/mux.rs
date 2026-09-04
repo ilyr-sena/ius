@@ -29,7 +29,8 @@ pub const USB_MTU: usize = 49152;
 pub const USB_MRU: usize = 16384;
 pub const ZLP_THRESHOLD: usize = 512;
 
-pub const INITIAL_WINDOW: u32 = 4194304;
+/// Matches reference usbmuxd: 128 KiB initial receive window, >>8 goes on the wire.
+pub const INITIAL_WINDOW: u32 = 131072;
 
 #[derive(Debug, Clone)]
 pub enum DeviceState {
@@ -201,8 +202,8 @@ impl ConnectionManager {
                 conn.tx_ack = tcp_header.seq.wrapping_add(1);
 
                 let ack_pkt = build_tcp_packet(
-                    device.version, device.tx_seq, device.rx_seq,
-                    conn.dest_port, sport,
+                    if device.version >= 2 { Some((device.tx_seq, device.rx_seq)) } else { None },
+                    conn.source_port, conn.dest_port,   // us→them: our port → their listening port
                     conn.tx_seq, conn.tx_ack,
                     TCP_ACK, 65535, None,
                 );
@@ -238,7 +239,7 @@ impl ConnectionManager {
                     conn.ib_buf.extend_from_slice(payload);
                     let free = max_conn_buffer.saturating_sub(conn.ib_buf.len());
                     let ack_pkt = build_tcp_packet(
-                        device.version, device.tx_seq, device.rx_seq,
+                        if device.version >= 2 { Some((device.tx_seq, device.rx_seq)) } else { None },
                         conn.source_port, conn.dest_port,
                         conn.tx_seq, conn.tx_ack,
                         TCP_ACK,
@@ -359,10 +360,17 @@ impl std::fmt::Display for TcpFlag {
 #[derive(Debug, Clone)]
 pub struct MuxHeader {
     pub protocol: u32,
-    pub length: u32,
-    pub version: u32,
-    pub message: u8,
-    pub tag: u32,
+    pub length: u32,         // total payload bytes INCLUDING this header
+    pub is_v2: bool,         // magic present ⇒ extended framing
+    pub tx_seq: u16,         // valid when is_v2
+    pub rx_seq: u16,         // valid when is_v2
+}
+
+impl MuxHeader {
+    /// Byte offset of the first payload byte after this header.
+    pub fn header_len(&self) -> usize {
+        if self.is_v2 { 16 } else { 8 }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -506,58 +514,40 @@ impl PacketReassembler {
 }
 
 pub fn parse_mux_header(data: &[u8]) -> Result<MuxHeader, MuxError> {
-    if data.len() < HEADER_SIZE {
+    if data.len() < 8 {
         return Err(MuxError::InvalidHeader(format!("too short: {} bytes", data.len())));
     }
-
     let protocol = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
     let length = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
 
-    let mut header = MuxHeader {
-        protocol,
-        length,
-        version: 0,
-        message: 0,
-        tag: 0,
+    let is_v2 = data.len() >= 12 && {
+        let m = u32::from_be_bytes([data[8], data[9], data[10], data[11]]);
+        // Both magics observed on the wire: 0xFEEDFACE (sent by us / most
+        // implementations) and 0xFACEFACE (sent back by recent Apple devices).
+        m == 0xFEED_FACE || m == 0xFACE_FACE
     };
-
-    let has_magic = data.len() >= 12 &&
-        data[8] == 0xFE && data[9] == 0xED && data[10] == 0xFA && data[11] == 0xCE;
-
-    if has_magic {
-        if data.len() >= 12 {
-            header.version = u32::from_be_bytes([data[12], data[13], data[14], data[15]]);
-        }
-        if data.len() >= 21 {
-            header.message = data[20];
-        }
-        if data.len() >= 25 {
-            header.tag = u32::from_be_bytes([data[21], data[22], data[23], data[24]]);
-        }
+    let (tx_seq, rx_seq) = if is_v2 && data.len() >= 16 {
+        (
+            u16::from_be_bytes([data[12], data[13]]),
+            u16::from_be_bytes([data[14], data[15]]),
+        )
     } else {
-        if data.len() >= 12 {
-            header.version = u32::from_be_bytes([data[8], data[9], data[10], data[11]]);
-        }
-        if data.len() >= 16 {
-            header.message = data[15];
-        }
-        if data.len() >= 20 {
-            header.tag = u32::from_be_bytes([data[16], data[17], data[18], data[19]]);
-        }
-    }
-
-    Ok(header)
+        (0, 0)
+    };
+    Ok(MuxHeader { protocol, length, is_v2, tx_seq, rx_seq })
 }
 
 pub fn parse_packet(data: &[u8]) -> Result<MuxPacket, MuxError> {
     let header = parse_mux_header(data)?;
-    let payload_start = HEADER_SIZE;
+    let payload_start = header.header_len();
     let payload_end = header.length as usize;
-    let payload = if payload_end > payload_start && payload_end <= data.len() {
-        data[payload_start..payload_end].to_vec()
-    } else {
-        Vec::new()
-    };
+    if payload_end > data.len() || payload_end < payload_start {
+        return Err(MuxError::InvalidHeader(format!(
+            "declared length {} inconsistent with buffer {} (header {} bytes)",
+            payload_end, data.len(), payload_start
+        )));
+    }
+    let payload = &data[payload_start..payload_end];
 
     match header.protocol {
         HEADER_VERSION => {
@@ -573,11 +563,11 @@ pub fn parse_packet(data: &[u8]) -> Result<MuxPacket, MuxError> {
             };
             Ok(MuxPacket::Version { major, minor })
         }
-        HEADER_CONTROL => Ok(MuxPacket::Control { payload }),
+        HEADER_CONTROL => Ok(MuxPacket::Control { payload: payload.to_vec() }),
         HEADER_SETUP => Ok(MuxPacket::Setup),
         HEADER_TCP => {
             if payload.len() >= 20 {
-                let tcp_header = TcpHeader::parse_tcp_header(&payload)?;
+                let tcp_header = TcpHeader::parse_tcp_header(payload)?;
                 let tcp_payload = payload[20..].to_vec();
                 Ok(MuxPacket::Tcp { header: tcp_header, payload: tcp_payload })
             } else {
@@ -618,24 +608,44 @@ pub fn build_setup_connect(source_port: u16, dest_port: u16) -> Vec<u8> {
     ]
 }
 
-pub fn build_version_request(_tx_seq: u16, rx_seq: u16) -> Vec<u8> {
-    vec![
-        0, 0, 0, 2,
-        0, 0, 0, 12,
-        0, 0, 0, 0,
-        0, 0, 0, 1,
-        (rx_seq >> 8) as u8, rx_seq as u8,
-    ]
+/// The mux-header size depends on the device protocol version:
+/// version < 2 → 8 bytes (protocol + length),
+/// version >= 2 → 16 bytes (adds `magic` + `tx_seq` + `rx_seq`).
+pub fn build_mux_frame(protocol: u32, v2_seqs: Option<(u16, u16)>, payload: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    match v2_seqs {
+        Some((tx, rx)) => {
+            let total = 16 + payload.len() as u32;
+            out.extend_from_slice(&protocol.to_be_bytes());
+            out.extend_from_slice(&total.to_be_bytes());
+            out.extend_from_slice(&0xFEEDFACEu32.to_be_bytes());
+            out.extend_from_slice(&tx.to_be_bytes());
+            out.extend_from_slice(&rx.to_be_bytes());
+        }
+        None => {
+            let total = 8 + payload.len() as u32;
+            out.extend_from_slice(&protocol.to_be_bytes());
+            out.extend_from_slice(&total.to_be_bytes());
+        }
+    }
+    out.extend_from_slice(payload);
+    out
 }
 
-pub fn build_setup_packet(_tx_seq: u16, rx_seq: u16) -> Vec<u8> {
-    vec![
-        0, 0, 0, 2,
-        0, 0, 0, 12,
-        0, 0, 0, 0,
-        0, 0, 0, 0,
-        (rx_seq >> 8) as u8, rx_seq as u8,
-    ]
+/// Version negotiation — always v0/v1 header (8 bytes), 12-byte version body.
+/// Matches usbmuxd device_add framing exactly: 20 bytes on the wire.
+pub fn build_version_request() -> Vec<u8> {
+    let mut payload = Vec::with_capacity(12);
+    payload.extend_from_slice(&2u32.to_be_bytes());   // major = 2
+    payload.extend_from_slice(&0u32.to_be_bytes());   // minor = 0
+    payload.extend_from_slice(&0u32.to_be_bytes());   // padding
+    build_mux_frame(HEADER_VERSION, None, &payload)
+}
+
+/// SETUP packet — payload is the single byte 0x07 (from reference).
+/// Used only after the device confirms version >= 2.
+pub fn build_setup_packet(tx_seq: u16, rx_seq: u16) -> Vec<u8> {
+    build_mux_frame(HEADER_SETUP, Some((tx_seq, rx_seq)), &[0x07])
 }
 
 pub fn build_mux_header(protocol: u32, length: u32) -> Vec<u8> {
@@ -645,10 +655,10 @@ pub fn build_mux_header(protocol: u32, length: u32) -> Vec<u8> {
     header
 }
 
+/// A TCP packet on the mux channel. `v2` when Some((tx_seq, rx_seq)) —
+/// uses the 16-byte header with magic and seq counters; otherwise 8-byte.
 pub fn build_tcp_packet(
-    _version: u32,
-    _tx_seq: u16,
-    _rx_seq: u16,
+    v2: Option<(u16, u16)>,
     sport: u16,
     dport: u16,
     tcp_seq: u32,
@@ -662,28 +672,23 @@ pub fn build_tcp_packet(
     tcp.extend_from_slice(&dport.to_be_bytes());
     tcp.extend_from_slice(&tcp_seq.to_be_bytes());
     tcp.extend_from_slice(&tcp_ack.to_be_bytes());
-    tcp.extend_from_slice(&((0x50u16 << 12) | flags).to_be_bytes());
+    // Buffer offset: Data offset (4 bits, in 32-bit words) << 12 | flags.
+    // A header with no options = 5 words = 0x5 in the top nibble. The previous
+    // version had a truncation bug: (0x50 << 12) overflows u16 to zero.
+    let offset_flags: u16 = (0x5u16 << 12) | (0x0FFF & flags);
+    tcp.extend_from_slice(&offset_flags.to_be_bytes());
     tcp.extend_from_slice(&window.to_be_bytes());
     tcp.extend_from_slice(&[0u8; 2]);
     tcp.extend_from_slice(&[0u8; 2]);
     if let Some(data) = payload {
         tcp.extend_from_slice(data);
     }
-
-    let mut buf = Vec::with_capacity(HEADER_SIZE + tcp.len());
-    buf.extend_from_slice(&build_mux_header(HEADER_TCP as u32, tcp.len() as u32));
-    buf.extend_from_slice(&tcp);
-    buf
+    build_mux_frame(HEADER_TCP, v2, &tcp)
 }
 
-pub fn build_control_packet(_version: u32, tx_seq: u16, rx_seq: u16, payload: &[u8]) -> Vec<u8> {
-    let body_len = 8 + payload.len();
-    let mut buf = Vec::with_capacity(HEADER_SIZE + body_len);
-    buf.extend_from_slice(&build_mux_header(HEADER_CONTROL as u32, body_len as u32));
-    buf.extend_from_slice(&(tx_seq as u32).to_be_bytes());
-    buf.extend_from_slice(&(rx_seq as u32).to_be_bytes());
-    buf.extend_from_slice(payload);
-    buf
+/// Control packet — device reports errors/status here. Same dual framing.
+pub fn build_control_packet(v2: Option<(u16, u16)>, payload: &[u8]) -> Vec<u8> {
+    build_mux_frame(HEADER_CONTROL, v2, payload)
 }
 
 pub fn build_packet(protocol: u32, data: &[u8]) -> Vec<u8> {
@@ -711,10 +716,10 @@ mod tests {
 
     #[test]
     fn test_parse_mux_header() {
-        let data = build_version_request(0, 0);
+        let data = build_version_request();
         let header = parse_mux_header(&data).unwrap();
-        assert_eq!(header.protocol, 2);
-        assert_eq!(header.length, 12);
+        assert_eq!(header.protocol, 0);
+        assert_eq!(header.length, 20);
     }
 
     #[test]
@@ -744,26 +749,38 @@ mod tests {
 
     #[test]
     fn test_build_version_request() {
-        let result = build_version_request(0, 0);
-        assert_eq!(result.len(), 18);
+        let data = build_version_request();
+        assert_eq!(data.len(), 20, "version request: 8 hdr + 12 version_body");
+        let header = parse_mux_header(&data).unwrap();
+        assert!(!header.is_v2);
+        assert_eq!(header.protocol, HEADER_VERSION);
+        assert_eq!(header.length, 20);
+        // major=2, minor=0 (BE u32s at offsets 8..16).
+        assert_eq!(&data[8..12], &2u32.to_be_bytes());
+        assert_eq!(&data[12..16], &0u32.to_be_bytes());
     }
 
     #[test]
-    fn test_parse_mux_header_version_request() {
-        let data = build_version_request(0, 0xFFFF);
+    fn test_build_setup_packet_v2() {
+        let data = build_setup_packet(0, 0xFFFF);
         let header = parse_mux_header(&data).unwrap();
-        assert_eq!(header.protocol, 2);
-        assert_eq!(header.length, 12);
-        assert_eq!(header.message, 1);
+        assert!(header.is_v2, "setup is v2-framed");
+        assert_eq!(header.protocol, HEADER_SETUP);
+        assert_eq!(header.rx_seq, 0xFFFF);  // reference resets to 0xFFFF during SETUP
+        assert_eq!(header.tx_seq, 0);
+        assert_eq!(*data.last().unwrap(), 0x07); // content byte
     }
 
     #[test]
-    fn test_parse_mux_header_setup_connect() {
-        let data = build_setup_connect(12345, 62078);
-        let header = parse_mux_header(&data).unwrap();
-        assert_eq!(header.protocol, 2);
-        assert_eq!(header.length, 17);
-        assert_eq!(header.message, 7);
+    fn test_build_tcp_packet_v2_layout() {
+        let pkt = build_tcp_packet(Some((42, 21)), 1100, 62078, 1, 77, TCP_SYN, (INITIAL_WINDOW >> 8) as u16, None);
+        // 16 mux-v2 header + 20 tcp header
+        assert_eq!(pkt.len(), 36);
+        assert_eq!(u32::from_be_bytes([pkt[0], pkt[1], pkt[2], pkt[3]]), HEADER_TCP as u32);
+        assert_eq!(u32::from_be_bytes([pkt[4], pkt[5], pkt[6], pkt[7]]), 36);
+        assert_eq!(&pkt[8..12], &[0xFE, 0xED, 0xFA, 0xCE]);
+        assert_eq!(u16::from_be_bytes([pkt[12], pkt[13]]), 42);
+        assert_eq!(u16::from_be_bytes([pkt[14], pkt[15]]), 21);
     }
 
     #[test]

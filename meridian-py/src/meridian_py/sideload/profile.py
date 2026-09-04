@@ -228,33 +228,30 @@ class ProfileManager:
 
         # 3. Need to mint fresh credentials or profile via Apple Developer Services
         log.info("provisioning fresh profile for %s (team %s)...", bundle_id, team_id)
-        session_cookies = None
+        session_data = None
         if not force_login and not force_renew:
-            session_cookies = load_session(SESSION_FILE)
+            session_data = load_session(SESSION_FILE)
 
-        if not session_cookies:
-            if use_browser:
-                session_cookies = browser_login(SESSION_FILE)
-            else:
-                try:
-                    session_cookies = terminal_login(SESSION_FILE, email=apple_id, password=password)
-                except Exception as e:
-                    log.warning("terminal login failed (%s) — falling back to browser login...", e)
-                    session_cookies = browser_login(SESSION_FILE)
+        if not session_data or "authToken" not in session_data:
+            import getpass
+            import json
+            from .gsa import GSAClient
 
-        for attempt in range(2):
-            client = DeveloperServicesClient(session_cookies)
-            try:
-                team_id = client.get_team_id()
-                dev_id = client.get_or_register_device(team_id, self.udid, device_name="iPhone")
-                break
-            except DeveloperServicesError as e:
-                if e.code in (1100, 3018, 3050) and attempt == 0:
-                    log.info("session expired on Apple servers, re-authenticating...")
-                    session_cookies = terminal_login(SESSION_FILE, email=apple_id, password=password)
-                else:
-                    raise
+            if not apple_id:
+                apple_id = input("Apple ID email: ").strip()
+            if not password:
+                password = getpass.getpass("Apple ID password: ")
+
+            gsa = GSAClient(username=apple_id)
+            session_data = gsa.authenticate(password)
+            with SESSION_FILE.open("w") as f:
+                json.dump(session_data, f, indent=2)
+
+        client = DeveloperServicesClient(session_data)
+        cert_team = team_id_from_cert(cert_path) if cert_path else None
+        team_id = client.get_team_id(fallback=cert_team or "SRTHYBYH35")
         log.info("using developer team: %s", team_id)
+        dev_id = client.get_or_register_device(team_id, self.udid, device_name="iPhone")
 
         # Check or submit certificate
         active_cert_id = None

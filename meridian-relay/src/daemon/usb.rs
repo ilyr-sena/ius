@@ -21,13 +21,13 @@ impl AppleMuxInterface {
 
     pub fn open(device: &rusb::Device<rusb::GlobalContext>, io_timeout: std::time::Duration) -> Result<Self, MuxError> {
         let handle: rusb::DeviceHandle<rusb::GlobalContext> = device.open()
-            .map_err(|e: rusb::Error| MuxError::UsbError(e.to_string()))?;
+            .map_err(|e: rusb::Error| MuxError::UsbError(format!("open: {e}")))?;
 
         // Find the mux interface by its well-known class triple
         // (class=255, subclass=254, protocol=2). Fall back to the first
         // interface with a bulk IN/OUT pair for unknown oddities.
         let (interface_num, read_ep, write_ep) = Self::find_mux_interface(device)
-            .map_err(|e| MuxError::UsbError(e))?;
+            .map_err(|e| MuxError::UsbError(format!("find interface: {e}")))?;
 
         // A kernel driver (e.g. a stale binding) may hold the interface — on
         // unix, detach it so the claim succeeds.
@@ -41,7 +41,7 @@ impl AppleMuxInterface {
         }
 
         handle.claim_interface(interface_num)
-            .map_err(|e: rusb::Error| MuxError::UsbError(e.to_string()))?;
+            .map_err(|e: rusb::Error| MuxError::UsbError(format!("claim iface {interface_num}: {e}")))?;
 
         Ok(Self {
             handle,
