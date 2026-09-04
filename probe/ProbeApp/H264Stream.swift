@@ -27,7 +27,11 @@ private enum MP4 {
                         _ payload: Data) -> Data {
         // ISO 14496-12: version (1 byte) + flags (3 bytes) = 4 bytes header.
         var head = Data([version])
-        head.append(Data([(UInt8(flags >> 16)), (UInt8(flags >> 8)), (UInt8(flags))]))
+        head.append(Data([
+            UInt8((flags >> 16) & 0xFF),
+            UInt8((flags >> 8) & 0xFF),
+            UInt8(flags & 0xFF)
+        ]))
         return box(type, head + payload)
     }
 
@@ -81,7 +85,7 @@ private enum MP4 {
             u32(1) + avc1Entry(avcC: avcC, width: width, height: height))
         let stbl = box("stbl",
             stsd
-            + fullbox("stts", 0, 0, u32(0) + u32(0))
+            + fullbox("stts", 0, 0, u32(0))
             + fullbox("stsc", 0, 0, u32(0))
             + fullbox("stsz", 0, 0, u32(0) + u32(0))
             + fullbox("stco", 0, 0, u32(0)))
@@ -420,9 +424,6 @@ final class H264Stream {
     }
 
     /// Full, safe teardown: complete outstanding encodes, invalidate, release.
-    /// `isTearingDown` is reset only after the async teardown finishes so no
-    /// new session can be created while VTCompressionSessionInvalidate is still
-    /// in flight on the background queue.
     private func teardownSession() {
         lock.lock()
         guard !isTearingDown, let s = session else { lock.unlock(); return }
@@ -525,14 +526,17 @@ final class H264Stream {
         lock.lock()
         var targets: [(WebSocketConn, Bool)] = []
         for i in clients.indices {
-            targets.append((clients[i].ws, !clients[i].joined))
-            if !clients[i].joined { clients[i].joined = true }
+            let needsInit = !clients[i].joined
+            if needsInit {
+                guard isSync else { continue }
+                clients[i].joined = true
+            }
+            targets.append((clients[i].ws, needsInit))
         }
         lock.unlock()
 
         for (ws, newlyJoined) in targets {
             if newlyJoined {
-                guard isSync else { continue }
                 ws.enqueue(opcode: 0x1, payload: Data("{\"codec\":\"\(codecStr)\"}".utf8))
                 if let seg = initSegSnapshot { ws.enqueue(opcode: 0x2, payload: seg) }
             }
@@ -545,8 +549,8 @@ final class H264Stream {
 // Client transport + viewer fanout
 // ---------------------------------------------------------------------------
 extension H264Stream {
-    func addWebSocket(_ conn: NWConnection) {
-        let ws = WebSocketConn(conn: conn) { [weak self] in
+    func addWebSocket(_ conn: NWConnection, initialBuffer: Data = Data()) {
+        let ws = WebSocketConn(conn: conn, initialBuffer: initialBuffer) { [weak self] in
             self?.remove(conn)
         }
         ws.onMessage = { [weak self] isText, data in

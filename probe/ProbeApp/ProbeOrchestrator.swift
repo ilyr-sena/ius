@@ -55,8 +55,8 @@ final class ProbeOrchestrator {
             }
             return nil
         }
-        server.webSocketHandler = { conn, _ in
-            H264Stream.shared.addWebSocket(conn)
+        server.webSocketHandler = { conn, _, body in
+            H264Stream.shared.addWebSocket(conn, initialBuffer: body)
         }
         // Perpetual mode: begin streaming automatically shortly after launch.
         DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 1.0) { [weak self] in

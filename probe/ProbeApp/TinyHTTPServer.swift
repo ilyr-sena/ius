@@ -5,7 +5,7 @@ import Network
 final class TinyHTTPServer {
     typealias Handler = (_ method: String, _ path: String) -> (Int, [String: Any])
     typealias RawHandler = (_ method: String, _ path: String) -> (Int, String, Data)?
-    typealias WebSocketHandler = (_ conn: NWConnection, _ headers: [String: String]) -> Void
+    typealias WebSocketHandler = (_ conn: NWConnection, _ headers: [String: String], _ initialBuffer: Data) -> Void
 
     private var listener: NWListener?
     private let queue = DispatchQueue(label: "ius.http")
@@ -88,7 +88,7 @@ final class TinyHTTPServer {
                 let resp = "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n" +
                            "Connection: Upgrade\r\nSec-WebSocket-Accept: \(accept)\r\n\r\n"
                 conn.send(content: Data(resp.utf8), completion: .contentProcessed { _ in
-                    sh(conn, headers)
+                    sh(conn, headers, body)
                 })
                 return
             }
@@ -158,9 +158,13 @@ final class WebSocketConn {
 
     static let maxOutboxBytes = 6 * 1024 * 1024
 
-    init(conn: NWConnection, onClose: @escaping () -> Void) {
+    init(conn: NWConnection, initialBuffer: Data = Data(), onClose: @escaping () -> Void) {
         self.conn = conn
+        self.buffer = initialBuffer
         self.onClose = onClose
+        if !self.buffer.isEmpty {
+            processFrames()
+        }
         recvLoop()
     }
 
@@ -285,7 +289,7 @@ final class WebSocketConn {
     private func parseFrame() -> (UInt8, Data)? {
         let b = buffer
         guard b.count >= 2 else { return nil }
-        let opcode = b[0] & 0x7F
+        let opcode = b[0] & 0x0F
         let masked = (b[1] & 0x80) != 0
         var len = Int(b[1] & 0x7F)
         var off = 2
