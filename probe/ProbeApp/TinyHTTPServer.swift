@@ -20,7 +20,13 @@ final class TinyHTTPServer {
     private static let wsGUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
     func start(port: UInt16) {
-        guard let l = try? NWListener(using: .tcp, on: NWEndpoint.Port(rawValue: port)!) else {
+        let tcpOpts = NWProtocolTCP.Options()
+        tcpOpts.noDelay = true
+        tcpOpts.enableKeepalive = true
+        let params = NWParameters(tls: nil, tcp: tcpOpts)
+        params.allowLocalEndpointReuse = true
+
+        guard let l = try? NWListener(using: params, on: NWEndpoint.Port(rawValue: port)!) else {
             print("[ius] FAILED to bind :\(port)")
             return
         }

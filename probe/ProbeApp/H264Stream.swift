@@ -159,10 +159,10 @@ private enum MP4 {
 // Stream configuration — live-adjustable, persisted across runs.
 // ---------------------------------------------------------------------------
 struct StreamTuning: Codable {
-    var bitrateMbps: Double = 4.0      // target average bitrate
+    var bitrateMbps: Double = 6.0      // target average bitrate
     var maxFps: Double = 0             // 0 = uncapped
     var scale: Double = 1.0            // resolution factor (0.25…1)
-    var keyframeSeconds: Double = 2.0  // IDR interval
+    var keyframeSeconds: Double = 1.0  // IDR interval
 
     static let bitsRange = 0.5...12.0
     static let scaleRange = 0.25...1.0
@@ -396,6 +396,8 @@ final class H264Stream {
             return
         }
         VTSessionSetProperty(s, key: kVTCompressionPropertyKey_RealTime, value: kCFBooleanTrue)
+        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_MaxFrameDelayCount, value: 0 as CFNumber)
+        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality, value: kCFBooleanTrue)
         VTSessionSetProperty(s, key: kVTCompressionPropertyKey_AverageBitRate,
                              value: Int(tuning.bitrateMbps * 1_000_000) as CFNumber)
         VTSessionSetProperty(s, key: kVTCompressionPropertyKey_ExpectedFrameRate,
@@ -734,7 +736,7 @@ extension H264Stream {
   <button id="btnFs" title="Fullscreen (F)">⤢ Fullscreen</button>
 </header>
 <main>
-  <video id="v" autoplay muted playsinline></video>
+  <video id="v" autoplay muted playsinline webkit-playsinline disablepictureinpicture></video>
   <div id="toast"></div>
   <aside id="panel" class="closed">
     <h2>Stream settings</h2>
@@ -772,6 +774,7 @@ extension H264Stream {
   }
 
   // ---- MSE setup -----------------------------------------------------------
+  let initialSeekDone = false;
   function openMSE(mime) {
     if (ms) return;
     ms = new MediaSource();
@@ -779,7 +782,16 @@ extension H264Stream {
       try {
         sb = ms.addSourceBuffer(mime);
         sb.mode = 'segments';
-        sb.addEventListener('updateend', drain);
+        sb.addEventListener('updateend', () => {
+          drain();
+          if (!initialSeekDone && sb.buffered.length > 0) {
+            const end = sb.buffered.end(sb.buffered.length - 1);
+            if (end > 0.05) {
+              v.currentTime = end;
+              initialSeekDone = true;
+            }
+          }
+        });
         drain();
         statLive.classList.add('live');
       } catch (e) { toastMsg('MSE unsupported: ' + e.message); }
@@ -797,18 +809,41 @@ extension H264Stream {
   }
 
   function liveEdge() {
-    if (!sb || !sb.buffered.length) return;
+    if (!sb || !sb.buffered.length) {
+      requestAnimationFrame(liveEdge);
+      return;
+    }
     const end = sb.buffered.end(sb.buffered.length - 1);
     const behind = end - v.currentTime;
-    statLat.textContent = behind.toFixed(2) + 's';
-    if (behind > 3) v.currentTime = end - 0.3;          // jump to live edge
-    else if (v.paused || v.ended) v.play().catch(() => {});
-    // keep buffer tight
-    if (behind > 15 && sb.buffered.length > 0) {
-      try { sb.remove(sb.buffered.start(0), end - 6); } catch (e) {}
+    statLat.textContent = Math.max(0, Math.round(behind * 1000)) + ' ms';
+
+    if (behind > 0.25) {
+      // Snappy jump if buffer lagged significantly
+      v.currentTime = Math.max(0, end - 0.02);
+      v.playbackRate = 1.0;
+    } else if (behind > 0.08) {
+      // Smooth catch-up playback
+      v.playbackRate = 1.25;
+    } else if (behind > 0.04) {
+      // Micro catch-up
+      v.playbackRate = 1.06;
+    } else if (behind < 0.02) {
+      // Exactly on live edge
+      v.playbackRate = 1.0;
     }
+
+    if (v.paused || v.ended) {
+      v.play().catch(() => {});
+    }
+
+    // Keep buffer compact so old chunks don't bloat memory
+    if (behind > 4 && !sb.updating && !appending) {
+      try { sb.remove(sb.buffered.start(0), end - 1.0); } catch (e) {}
+    }
+
+    requestAnimationFrame(liveEdge);
   }
-  setInterval(liveEdge, 400);
+  requestAnimationFrame(liveEdge);
 
   // ---- websocket -----------------------------------------------------------
   function connect() {
@@ -834,7 +869,7 @@ extension H264Stream {
       } else {
         pending.push(new Uint8Array(ev.data));
         rxBytes += ev.data.byteLength; fpsCount++;
-        if (pending.length > 240) pending.splice(0, pending.length - 120);
+        if (pending.length > 8) pending.splice(0, pending.length - 2);
         drain();
       }
     };
@@ -842,7 +877,7 @@ extension H264Stream {
   connect();
 
   // ---- tuning panel --------------------------------------------------------
-  const state = { bitrateMbps: 4, maxFps: 0, scale: 1, keyframeSeconds: 2 };
+  const state = { bitrateMbps: 6, maxFps: 0, scale: 1, keyframeSeconds: 1 };
   document.getElementById('btnTune').onclick = () => panel.classList.toggle('closed');
   document.getElementById('btnFs').onclick = () => {
     if (document.fullscreenElement) document.exitFullscreen(); else v.requestFullscreen();
@@ -867,7 +902,7 @@ extension H264Stream {
   rBitrate.oninput = () => { state.bitrateMbps = parseFloat(rBitrate.value); vBitrate.textContent = rBitrate.value + ' M'; };
   segInit(segFps, [0, 30, 60], 0, v => v === 0 ? 'max' : v, v => state.maxFps = v);
   segInit(segScale, [0.5, 0.75, 1.0], 1, v => (v * 100) + '%', v => state.scale = v);
-  segInit(segKey, [1, 2, 5], 2, v => v + 's', v => state.keyframeSeconds = v);
+  segInit(segKey, [0.5, 1, 2], 1, v => v + 's', v => state.keyframeSeconds = v);
 
   function fillTuning(m) {
     Object.assign(state, {
