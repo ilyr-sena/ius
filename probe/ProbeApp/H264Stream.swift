@@ -25,8 +25,9 @@ private enum MP4 {
 
     static func fullbox(_ type: String, _ version: UInt8, _ flags: UInt32,
                         _ payload: Data) -> Data {
+        // ISO 14496-12: version (1 byte) + flags (3 bytes) = 4 bytes header.
         var head = Data([version])
-        head.append(u32(flags))
+        head.append(Data([(UInt8(flags >> 16)), (UInt8(flags >> 8)), (UInt8(flags))]))
         return box(type, head + payload)
     }
 
