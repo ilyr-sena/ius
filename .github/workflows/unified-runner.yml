@@ -1,0 +1,65 @@
+name: unified-runner
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "probe/**"
+      - "tools/merge_probe_wda.py"
+      - ".github/workflows/unified-runner.yml"
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain info
+        run: |
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+
+      - name: Clone WebDriverAgent
+        run: git clone --depth 1 https://github.com/appium/WebDriverAgent.git
+
+      - name: Integrate Probe streaming engine into WebDriverAgentRunner
+        run: python3 tools/merge_probe_wda.py --wda WebDriverAgent --probe probe/ProbeApp
+
+      - name: Build Unified Runner (unsigned)
+        working-directory: WebDriverAgent
+        run: |
+          xcodebuild build-for-testing \
+            -project WebDriverAgent.xcodeproj \
+            -scheme WebDriverAgentRunner \
+            -destination 'generic/platform=iOS' \
+            -configuration Debug \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY=""
+
+      - name: Ad-hoc sign app and nested bundles
+        working-directory: WebDriverAgent
+        run: |
+          APP=$(find build/Build/Products/Debug-iphoneos -maxdepth 1 -name '*Runner.app' | head -1)
+          echo "Found app: $APP"
+          # Sign nested bundles deepest-first
+          find "$APP" -type d \( -name '*.xctest' -o -name '*.framework' \) | sort -r | while read -r b; do
+            codesign --force --sign - "$b" && echo "signed bundle: $b"
+          done
+          find "$APP" -type f -perm +111 -name '*.dylib' | while read -r d; do
+            codesign --force --sign - "$d" && echo "signed dylib: $d"
+          done
+          codesign --force --sign - "$APP"
+          echo "signed host app: $APP"
+
+      - name: Package MeridianRunner IPA
+        working-directory: WebDriverAgent
+        run: |
+          APP=$(find build/Build/Products/Debug-iphoneos -maxdepth 1 -name '*Runner.app' | head -1)
+          mkdir -p Payload
+          cp -R "$APP" Payload/
+          zip -qry MeridianRunner-unsigned.ipa Payload
+
+      - name: Upload MeridianRunner IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: MeridianRunner-unsigned-ipa
+          path: WebDriverAgent/MeridianRunner-unsigned.ipa
