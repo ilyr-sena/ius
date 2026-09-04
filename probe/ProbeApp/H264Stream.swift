@@ -539,7 +539,8 @@ final class H264Stream {
 
         for (ws, newlyJoined) in targets {
             if newlyJoined {
-                ws.enqueue(opcode: 0x1, payload: Data("{\"codec\":\"\(codecStr)\"}".utf8))
+                let avcCB64 = newAvcC.base64EncodedString()
+                ws.enqueue(opcode: 0x1, payload: Data("{\"codec\":\"\(codecStr)\",\"avcC\":\"\(avcCB64)\",\"width\":\(encWidth),\"height\":\(encHeight)}".utf8))
                 if let seg = initSegSnapshot { ws.enqueue(opcode: 0x2, payload: seg) }
             }
             ws.enqueue(opcode: 0x2, payload: frag)
@@ -710,7 +711,7 @@ extension H264Stream {
   button, select { background:#1e1e28; color:var(--fg); border:1px solid var(--line); border-radius:8px; font:inherit; font-size:13px; padding:6px 10px; cursor:pointer; }
   button:hover, select:hover { border-color:var(--acc) }
   main { position:relative; flex:1; display:flex; align-items:center; justify-content:center; background:#000; min-height:0; }
-  video { max-width:100%; max-height:100%; outline:none; }
+  video, canvas { max-width:100%; max-height:100%; outline:none; object-fit:contain; }
   #toast { position:absolute; top:12px; left:50%; transform:translateX(-50%); background:rgba(22,22,29,.92); border:1px solid var(--line); color:var(--fg); border-radius:10px; padding:7px 14px; font-size:13px; opacity:0; transition:opacity .18s; pointer-events:none; }
   #toast.show { opacity:1 }
   #panel { position:absolute; right:12px; top:12px; width:230px; background:rgba(20,20,28,.96); border:1px solid var(--line); border-radius:12px; padding:12px; transform:translateX(0); transition:transform .18s, opacity .18s; backdrop-filter: blur(8px); }
@@ -735,8 +736,9 @@ extension H264Stream {
   <button id="btnTune" title="Stream settings (S)">⚙ Tune</button>
   <button id="btnFs" title="Fullscreen (F)">⤢ Fullscreen</button>
 </header>
-<main>
-  <video id="v" autoplay muted playsinline webkit-playsinline disablepictureinpicture></video>
+<main id="stage">
+  <canvas id="c"></canvas>
+  <video id="v" autoplay muted playsinline webkit-playsinline disablepictureinpicture style="display:none"></video>
   <div id="toast"></div>
   <aside id="panel" class="closed">
     <h2>Stream settings</h2>
@@ -749,13 +751,16 @@ extension H264Stream {
 </main>
 <script>
 (() => {
-  const v = document.getElementById('v'), toast = document.getElementById('toast');
+  const v = document.getElementById('v'), c = document.getElementById('c'), toast = document.getElementById('toast');
   const statLive = document.getElementById('statLive'), statMbps = document.getElementById('statMbps');
   const statFps = document.getElementById('statFps'), statLat = document.getElementById('statLat');
   const panel = document.getElementById('panel');
   let ws, ms, sb, retryT, codec = null;
-  let pending = [], appending = false, started = false;
+  let pending = [], appending = false;
   let rxBytes = 0, rxStamp = performance.now(), fpsCount = 0, fpsStamp = performance.now();
+  let webCodecsDecoder = null;
+  let ctx2d = null;
+  const hasWebCodecs = typeof window.VideoDecoder === 'function';
 
   // ---- stats ---------------------------------------------------------------
   const fmtMbps = b => (b * 8 / 1e6).toFixed(2);
@@ -768,15 +773,78 @@ extension H264Stream {
     rxBytes = 0; fpsCount = 0;
   }, 800);
 
+  // Ping device periodically to monitor physical transport RTT
+  setInterval(() => {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      try { ws.send(JSON.stringify({ kind: 'ping', t: performance.now() })); } catch(e){}
+    }
+  }, 800);
+
   function toastMsg(t) {
     toast.textContent = t; toast.classList.add('show');
     clearTimeout(toast._t); toast._t = setTimeout(() => toast.classList.remove('show'), 1600);
   }
 
-  // ---- MSE setup -----------------------------------------------------------
+  // ---- WebCodecs Pipeline (Zero Buffer Delay, 60fps) -----------------------
+  function initWebCodecs(m) {
+    if (!hasWebCodecs) {
+      fallbackToMSE(m);
+      return;
+    }
+    if (webCodecsDecoder) {
+      try { webCodecsDecoder.close(); } catch(e){}
+      webCodecsDecoder = null;
+    }
+    ctx2d = c.getContext('2d', { alpha: false, desynchronized: true });
+    webCodecsDecoder = new VideoDecoder({
+      output: frame => {
+        if (c.width !== frame.displayWidth || c.height !== frame.displayHeight) {
+          c.width = frame.displayWidth;
+          c.height = frame.displayHeight;
+        }
+        ctx2d.drawImage(frame, 0, 0);
+        frame.close();
+        fpsCount++;
+      },
+      error: err => {
+        console.warn('WebCodecs error, switching to MSE fallback:', err);
+        fallbackToMSE(m);
+      }
+    });
+
+    try {
+      const desc = Uint8Array.from(atob(m.avcC), ch => ch.charCodeAt(0));
+      webCodecsDecoder.configure({
+        codec: m.codec,
+        description: desc,
+        optimizeForLatency: true
+      });
+      c.style.display = 'block';
+      v.style.display = 'none';
+      statLive.classList.add('live');
+      document.getElementById('statCodec').textContent = m.codec + ' (gpu)';
+    } catch(e) {
+      console.warn('WebCodecs config failed:', e);
+      fallbackToMSE(m);
+    }
+  }
+
+  function fallbackToMSE(m) {
+    if (webCodecsDecoder) {
+      try { webCodecsDecoder.close(); } catch(e){}
+      webCodecsDecoder = null;
+    }
+    c.style.display = 'none';
+    v.style.display = 'block';
+    openMSE('video/mp4; codecs="' + m.codec + '"');
+    document.getElementById('statCodec').textContent = m.codec + ' (mse)';
+  }
+
+  // ---- MSE Pipeline (Smooth Continuous Fallback) ---------------------------
   let initialSeekDone = false;
   function openMSE(mime) {
     if (ms) return;
+    initialSeekDone = false;
     ms = new MediaSource();
     ms.addEventListener('sourceopen', () => {
       try {
@@ -801,49 +869,35 @@ extension H264Stream {
 
   function drain() {
     if (!sb || sb.updating || appending) return;
-    const c = pending.shift();
-    if (!c) return;
+    const item = pending.shift();
+    if (!item) return;
     appending = true;
-    try { sb.appendBuffer(c); } catch (e) { toastMsg('append error: ' + e.message); }
+    try { sb.appendBuffer(item); } catch (e) { toastMsg('append error: ' + e.message); }
     appending = false;
   }
 
-  function liveEdge() {
-    if (!sb || !sb.buffered.length) {
-      requestAnimationFrame(liveEdge);
-      return;
-    }
-    const end = sb.buffered.end(sb.buffered.length - 1);
-    const behind = end - v.currentTime;
-    statLat.textContent = Math.max(0, Math.round(behind * 1000)) + ' ms';
+  // MSE smooth drift control - NO violent seeking, NO playbackRate oscillation
+  function smoothLiveEdge() {
+    if (!webCodecsDecoder && sb && sb.buffered.length > 0) {
+      const end = sb.buffered.end(sb.buffered.length - 1);
+      const behind = end - v.currentTime;
+      statLat.textContent = Math.max(0, Math.round(behind * 1000)) + ' ms';
 
-    if (behind > 0.25) {
-      // Snappy jump if buffer lagged significantly
-      v.currentTime = Math.max(0, end - 0.02);
-      v.playbackRate = 1.0;
-    } else if (behind > 0.08) {
-      // Smooth catch-up playback
-      v.playbackRate = 1.25;
-    } else if (behind > 0.04) {
-      // Micro catch-up
-      v.playbackRate = 1.06;
-    } else if (behind < 0.02) {
-      // Exactly on live edge
-      v.playbackRate = 1.0;
+      if (behind > 1.0) {
+        v.currentTime = end - 0.05;
+        v.playbackRate = 1.0;
+      } else if (behind > 0.12) {
+        v.playbackRate = 1.08;
+      } else {
+        v.playbackRate = 1.0;
+      }
+      if (v.paused || v.ended) v.play().catch(() => {});
+      if (behind > 6 && !sb.updating && !appending) {
+        try { sb.remove(sb.buffered.start(0), end - 2.0); } catch (e) {}
+      }
     }
-
-    if (v.paused || v.ended) {
-      v.play().catch(() => {});
-    }
-
-    // Keep buffer compact so old chunks don't bloat memory
-    if (behind > 4 && !sb.updating && !appending) {
-      try { sb.remove(sb.buffered.start(0), end - 1.0); } catch (e) {}
-    }
-
-    requestAnimationFrame(liveEdge);
   }
-  requestAnimationFrame(liveEdge);
+  setInterval(smoothLiveEdge, 200);
 
   // ---- websocket -----------------------------------------------------------
   function connect() {
@@ -864,12 +918,62 @@ extension H264Stream {
     ws.onmessage = ev => {
       if (typeof ev.data === 'string') {
         let m; try { m = JSON.parse(ev.data); } catch { return; }
-        if (m.codec) { codec = m.codec; document.getElementById('statCodec').textContent = codec; openMSE('video/mp4; codecs="' + codec + '"'); }
+        if (m.codec) {
+          codec = m.codec;
+          if (hasWebCodecs && m.avcC) {
+            initWebCodecs(m);
+          } else {
+            fallbackToMSE(m);
+          }
+        }
         if (m.op === 'tuning') fillTuning(m);
+        if (m.t) {
+          const rtt = Math.round(performance.now() - m.t);
+          statLat.textContent = rtt + ' ms';
+        }
       } else {
-        pending.push(new Uint8Array(ev.data));
-        rxBytes += ev.data.byteLength; fpsCount++;
-        if (pending.length > 8) pending.splice(0, pending.length - 2);
+        const data = new Uint8Array(ev.data);
+        rxBytes += data.byteLength;
+
+        if (webCodecsDecoder && webCodecsDecoder.state === 'configured') {
+          if (data.length < 8) return;
+          const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+          const tag = String.fromCharCode(data[4], data[5], data[6], data[7]);
+          if (tag === 'ftyp') return;
+          if (tag === 'moof') {
+            const moofLen = view.getUint32(0);
+            if (moofLen + 8 > data.length) return;
+            const naluData = new Uint8Array(data.buffer, data.byteOffset + moofLen + 8, data.byteLength - moofLen - 8);
+            if (naluData.length < 5) return;
+
+            let isKey = false;
+            let pos = 0;
+            while (pos + 4 < naluData.length) {
+              const nalLen = (naluData[pos] << 24) | (naluData[pos+1] << 16) | (naluData[pos+2] << 8) | naluData[pos+3];
+              const nalType = naluData[pos + 4] & 0x1F;
+              if (nalType === 5 || nalType === 7) {
+                isKey = true;
+                break;
+              }
+              pos += 4 + nalLen;
+            }
+
+            try {
+              webCodecsDecoder.decode(new EncodedVideoChunk({
+                type: isKey ? 'key' : 'delta',
+                timestamp: performance.now() * 1000,
+                data: naluData
+              }));
+            } catch(e) {
+              console.warn('decode error:', e);
+            }
+            return;
+          }
+        }
+
+        // MSE path
+        fpsCount++;
+        pending.push(data);
         drain();
       }
     };
@@ -880,7 +984,8 @@ extension H264Stream {
   const state = { bitrateMbps: 6, maxFps: 0, scale: 1, keyframeSeconds: 1 };
   document.getElementById('btnTune').onclick = () => panel.classList.toggle('closed');
   document.getElementById('btnFs').onclick = () => {
-    if (document.fullscreenElement) document.exitFullscreen(); else v.requestFullscreen();
+    const el = webCodecsDecoder ? c : v;
+    if (document.fullscreenElement) document.exitFullscreen(); else el.requestFullscreen();
   };
 
   const rBitrate = document.getElementById('rBitrate');

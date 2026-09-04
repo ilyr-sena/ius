@@ -25,7 +25,7 @@ final class WdaRelay {
             }
             return ["ok": true, "queued": true]
         case "ping":
-            return ["ok": true]
+            return ["ok": true, "t": message["t"] ?? 0]
         default:
             return ["ok": false, "error": "unknown kind"]
         }
