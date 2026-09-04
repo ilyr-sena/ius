@@ -178,6 +178,15 @@ final class WebSocketConn {
     func enqueue(opcode: UInt8 = 0x2, payload: Data) {
         lock.lock()
         guard !closed else { lock.unlock(); return }
+
+        // Low-latency queue policy: if video frames are backing up in outbox,
+        // drop stale frames and request a fresh IDR keyframe immediately.
+        if opcode == 0x2 && outbox.count >= 2 {
+            outbox.removeAll()
+            outBytes = 0
+            H264Stream.shared.requestKeyFrame()
+        }
+
         var frame = encodeFrame(opcode: opcode, payload: payload)
         outbox.append(frame)
         outBytes += frame.count

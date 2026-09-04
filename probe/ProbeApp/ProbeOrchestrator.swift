@@ -23,9 +23,13 @@ final class ProbeOrchestrator {
             capturingOnly = false
             return
         }
-        let w = d["width"] as? Int ?? 1170
-        let h = d["height"] as? Int ?? 2532
-        print("[ius] standalone capture start \(w)x\(h)")
+        let nativeW = d["width"] as? Int ?? 1170
+        let nativeH = d["height"] as? Int ?? 2532
+        // Optimal capture scale: 0.6x native (702x1520) - 60fps locked, sharp text, no GPU scale lag
+        let scale = 0.6
+        let w = Int((Double(nativeW) * scale / 2).rounded()) * 2
+        let h = Int((Double(nativeH) * scale / 2).rounded()) * 2
+        print("[ius] standalone capture start \(w)x\(h) (native \(nativeW)x\(nativeH))")
         _ = AudioKeepAlive.shared.start()
         if let err = capture.startCapture(width: w, height: h) {
             print("[ius] standalone capture FAILED: \(err)")

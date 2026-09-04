@@ -447,6 +447,12 @@ final class H264Stream {
         teardownSession()
     }
 
+    public func requestKeyFrame() {
+        lock.lock()
+        pendingForceKeyFrame = true
+        lock.unlock()
+    }
+
     // ---- packets -----------------------------------------------------------
 
     private func isSyncFrame(_ sb: CMSampleBuffer) -> Bool {
