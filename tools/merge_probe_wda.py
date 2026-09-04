@@ -146,7 +146,13 @@ def integrate(wda_dir: Path, probe_dir: Path) -> None:
 
     log.info("4. Replacing app icon with custom Meridian design...")
     icon_path = runner_dir / "Assets.xcassets" / "AppIcon.appiconset" / "icon-1024.png"
-    generate_meridian_icon(icon_path)
+    asset_icon = probe_dir.parent / "Assets" / "icon-1024.png"
+    if asset_icon.exists():
+        icon_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(asset_icon, icon_path)
+        log.info("✓ Copied pre-rendered Meridian icon to %s", icon_path)
+    else:
+        generate_meridian_icon(icon_path)
 
     log.info("5. Updating project.pbxproj to rebrand bundle IDs and include Swift sources...")
     content = pbx_path.read_text()

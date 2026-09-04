@@ -21,9 +21,6 @@ jobs:
       - name: Clone WebDriverAgent
         run: git clone --depth 1 https://github.com/appium/WebDriverAgent.git
 
-      - name: Install Pillow for icon generation
-        run: pip3 install Pillow
-
       - name: Integrate Probe streaming engine into WebDriverAgentRunner
         run: python3 tools/merge_probe_wda.py --wda WebDriverAgent --probe probe/ProbeApp
 
