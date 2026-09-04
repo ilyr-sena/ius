@@ -260,7 +260,11 @@ final class WebSocketConn {
     }
 
     private func processFrames() {
-        while true {
+        // Bounded: even if the connection never delivers more bytes we can
+        // only dispatch complete frames currently present in `buffer`.
+        var budget = 16
+        while budget > 0 {
+            budget -= 1
             guard let (opcode, payload) = parseFrame() else { break }
             switch opcode {
             case 0x8:                       // close
@@ -301,6 +305,9 @@ final class WebSocketConn {
         if masked, !maskKey.isEmpty {
             for i in 0..<payload.count { payload[i] ^= maskKey[i % 4] }
         }
+        // Consume the frame from the receive buffer — else parseFrame loops
+        // forever on the same frame and processFrames never returns.
+        buffer = Data(b[(off + len)...])
         return (opcode, payload)
     }
 }

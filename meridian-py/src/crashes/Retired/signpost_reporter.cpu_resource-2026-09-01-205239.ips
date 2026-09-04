@@ -1,0 +1,184 @@
+{"duration_ms":"90988","share_with_app_devs":0,"roots_installed":0,"bug_type":"202","os_version":"iPhone OS 27.0 (24A5418b)","slice_uuid":"1C21ECE3-43DE-3BA4-BE7A-69AC5F285A3D","is_first_party":1,"incident_id":"A3A16374-6BE7-40E4-8330-AD42BBF5BBCD","timestamp":"2026-09-01 20:52:39.00 -0400","app_name":"signpost_reporter","name":"signpost_reporter"}
+Date/Time:        2026-09-01 20:51:04.421 -0400
+End time:         2026-09-01 20:52:35.409 -0400
+OS Version:       iPhone OS 27.0 (Build 24A5418b)
+Architecture:     arm64e
+Report Version:   73
+Incident Identifier: A3A16374-6BE7-40E4-8330-AD42BBF5BBCD
+
+Data Source:      Microstackshots
+Shared Cache:     7CD05163-CF55-34F1-BB5F-6926BE60ED97 slid base address 0x192b9c000
+
+Command:          signpost_reporter
+Path:             /usr/libexec/signpost_reporter
+Resource Coalition: "com.apple.signpost.signpost_reporter"(1135)
+On Behalf Of:     6 samples UNKNOWN [11776] (6 samples originated by UNKNOWN [11776])
+Architecture:     arm64e
+Parent:           UNKNOWN [1]
+PID:              18453
+
+Event:            cpu usage
+Action taken:     none
+CPU:              90 seconds cpu time over 91 seconds (99% cpu average), exceeding limit of 50% cpu over 180 seconds
+CPU limit:        90s
+Limit duration:   180s
+CPU used:         90s
+CPU duration:     91s
+Duration:         90.99s
+Duration Sampled: 66.89s (event ends 23.91s after samples)
+Steps:            6 (10 gigacycles/step)
+
+Hardware model:   iPhone14,5
+Active cpus:      6
+Memory size:      3.58 GB
+HW page size:     16384
+VM page size:     16384
+Shared cache residency: 7.60% (517.89 MB / 6815.28 MB)
+
+Time Since Boot:  322014s
+Time Awake Since Boot: 145524s
+Time Since Wake:  4877s
+
+Total CPU Time:   71.919s
+Advisory levels:  Battery -> 3, User -> 3, ThermalPressure -> 0, Combined -> 3
+Free disk space:  6332.30 MB/119.09 GB, low space threshold 150 MB
+Vnodes Available: 62.78% (12556/20000, 10000 allocated, 10000 soft limit)
+Models:           none
+
+Preferred User Language: en-VE
+Country Code:     VE
+Keyboards:        en_US QWERTYLatin American, es_419 QWERTY-Spanish;ml=2
+OS Cryptex File Extents: 19487
+
+Heaviest stack for the target process:
+  6  ??? (libsystem_pthread.dylib + 2320) [0x1930d6910]
+  6  ??? (libsystem_pthread.dylib + 4664) [0x1930d7238]
+  6  ??? (libdispatch.dylib + 87740) [0x1c14686bc]
+  6  ??? (libdispatch.dylib + 89240) [0x1c1468c98]
+  6  ??? (libdispatch.dylib + 46192) [0x1c145e470]
+  6  ??? (libdispatch.dylib + 43132) [0x1c145d87c]
+  6  ??? (libdispatch.dylib + 114624) [0x1c146efc0]
+  6  ??? (libdispatch.dylib + 7372) [0x1c1454ccc]
+  6  ??? (LoggingSupport + 62468) [0x1d4ef5404]
+  6  ??? (LoggingSupport + 63120) [0x1d4ef5690]
+  6  ??? (LoggingSupport + 66860) [0x1d4ef652c]
+  6  ??? (LoggingSupport + 54056) [0x1d4ef3328]
+  6  ??? (LoggingSupport + 45372) [0x1d4ef113c]
+  6  ??? (LoggingSupport + 45096) [0x1d4ef1028]
+  6  ??? (LoggingSupport + 41316) [0x1d4ef0164]
+  6  ??? (LoggingSupport + 54804) [0x1d4ef3614]
+  6  ??? (SignpostCollection + 6272) [0x2b5a26880]
+  3  ??? (SignpostCollection + 7160) [0x2b5a26bf8]
+  2  ??? (SignpostCollection + 8000) [0x2b5a26f40]
+  2  ??? (LoggingSupport + 38048) [0x1d4eef4a0]
+  2  ??? (LoggingSupport + 33884) [0x1d4eee45c]
+  2  ??? (LoggingSupport + 47340) [0x1d4ef18ec]
+  2  ??? (liblog_signpost.description.dylib + 1960) [0x2d3e6c7a8]
+  2  ??? (liblog_signpost.description.dylib + 2216) [0x2d3e6c8a8]
+  2  ??? (Foundation + 147412) [0x19369dfd4]
+  2  ??? (CoreFoundation + 22108) [0x19319c65c]
+  1  ??? (CoreFoundation + 22572) [0x19319c82c]
+  1  ??? (CoreFoundation + 45868) [0x1931a232c]
+  1  ??? (CoreFoundation + 48400) [0x1931a2d10]
+
+
+Powerstats for:   signpost_reporter [18453]
+UUID:             1C21ECE3-43DE-3BA4-BE7A-69AC5F285A3D
+Path:             /usr/libexec/signpost_reporter
+Resource Coalition: 6 samples "com.apple.signpost.signpost_reporter"(1135)
+On Behalf Of:     6 samples UNKNOWN [11776] (6 samples originated by UNKNOWN [11776])
+Architecture:     arm64e
+Parent:           UNKNOWN [1]
+UID:              0
+Sudden Term:      Tracked (allows idle exit)
+Footprint:        12.30 MB
+Pageins:          8 pages
+Start time:       2026-09-01 20:51:04.601 -0400
+End time:         2026-09-01 20:52:11.495 -0400
+Num samples:      6 (100%)
+Energy:           531.68 uWh
+Num threads:      1
+Primary state:    6 samples Non-Frontmost App, Non-Suppressed, User mode, Effective Thread QoS Background, Requested Thread QoS Utility, Override Thread QoS Unspecified, e-core
+User Activity:    6 samples Idle, 0 samples Active
+Power Source:     0 samples on Battery, 6 samples on AC
+  6  ??? (libsystem_pthread.dylib + 2320) [0x1930d6910]
+    6  ??? (libsystem_pthread.dylib + 4664) [0x1930d7238]
+      6  ??? (libdispatch.dylib + 87740) [0x1c14686bc]
+        6  ??? (libdispatch.dylib + 89240) [0x1c1468c98]
+          6  ??? (libdispatch.dylib + 46192) [0x1c145e470]
+            6  ??? (libdispatch.dylib + 43132) [0x1c145d87c]
+              6  ??? (libdispatch.dylib + 114624) [0x1c146efc0]
+                6  ??? (libdispatch.dylib + 7372) [0x1c1454ccc]
+                  6  ??? (LoggingSupport + 62468) [0x1d4ef5404]
+                    6  ??? (LoggingSupport + 63120) [0x1d4ef5690]
+                      6  ??? (LoggingSupport + 66860) [0x1d4ef652c]
+                        6  ??? (LoggingSupport + 54056) [0x1d4ef3328]
+                          6  ??? (LoggingSupport + 45372) [0x1d4ef113c]
+                            6  ??? (LoggingSupport + 45096) [0x1d4ef1028]
+                              6  ??? (LoggingSupport + 41316) [0x1d4ef0164]
+                                6  ??? (LoggingSupport + 54804) [0x1d4ef3614]
+                                  6  ??? (SignpostCollection + 6272) [0x2b5a26880]
+                                    3  ??? (SignpostCollection + 7160) [0x2b5a26bf8]
+                                      2  ??? (SignpostCollection + 8000) [0x2b5a26f40]
+                                        2  ??? (LoggingSupport + 38048) [0x1d4eef4a0]
+                                          2  ??? (LoggingSupport + 33884) [0x1d4eee45c]
+                                            2  ??? (LoggingSupport + 47340) [0x1d4ef18ec]
+                                              2  ??? (liblog_signpost.description.dylib + 1960) [0x2d3e6c7a8]
+                                                2  ??? (liblog_signpost.description.dylib + 2216) [0x2d3e6c8a8]
+                                                  2  ??? (Foundation + 147412) [0x19369dfd4]
+                                                    2  ??? (CoreFoundation + 22108) [0x19319c65c]
+                                                      1  ??? (CoreFoundation + 22572) [0x19319c82c]
+                                                        1  ??? (CoreFoundation + 45868) [0x1931a232c]
+                                                          1  ??? (CoreFoundation + 48400) [0x1931a2d10]
+                                                            1  <on behalf of UNKNOWN [11776] (originated by UNKNOWN [11776])>
+                                                      1  ??? (CoreFoundation + 22532) [0x19319c804]
+                                                        1  ??? (CoreFoundation + 32820) [0x19319f034]
+                                                          1  <on behalf of UNKNOWN [11776] (originated by UNKNOWN [11776])>
+                                      1  ??? (SignpostCollection + 8376) [0x2b5a270b8]
+                                        1  ??? (libobjc.A.dylib + 4672) [0x192fa1240]
+                                          1  <on behalf of UNKNOWN [11776] (originated by UNKNOWN [11776])>
+                                    2  ??? (SignpostCollection + 7180) [0x2b5a26c0c]
+                                      2  ??? (SignpostSupport + 26348) [0x22a8916ec]
+                                        2  ??? (SignpostSupport + 27544) [0x22a891b98]
+                                          1  ??? (SignpostSupport + 35792) [0x22a893bd0]
+                                            1  ??? (SignpostSupport + 18092) [0x22a88f6ac]
+                                              1  ??? (signpost_reporter + 23916) [0x1009a1d6c]
+                                                1  ??? (signpost_reporter + 6816) [0x10099daa0]
+                                                  1  ??? (signpost_reporter + 6436) [0x10099d924]
+                                                    1  ??? (libobjc.A.dylib + 176612) [0x192fcb1e4]
+                                                      1  <on behalf of UNKNOWN [11776] (originated by UNKNOWN [11776])>
+                                          1  ??? (SignpostSupport + 35756) [0x22a893bac]
+                                            1  ??? (SignpostSupport + 66020) [0x22a89b1e4]
+                                              1  ??? (SignpostSupport + 18304) [0x22a88f780]
+                                                1  ??? (SignpostSupport + 31576) [0x22a892b58]
+                                                  1  ??? (SignpostSupport + 43788) [0x22a895b0c]
+                                                    1  ??? (CoreFoundation + 162572) [0x1931beb0c]
+                                                      1  ??? (CoreFoundation + 62196) [0x1931a62f4]
+                                                        1  ??? (CoreFoundation + 62484) [0x1931a6414]
+                                                          1  <on behalf of UNKNOWN [11776] (originated by UNKNOWN [11776])>
+                                    1  ??? (SignpostCollection + 7048) [0x2b5a26b88]
+                                      1  ??? (libobjc.A.dylib + 23532) [0x192fa5bec]
+                                        1  ??? (libobjc.A.dylib + 15316) [0x192fa3bd4]
+                                          1  ??? (libobjc.A.dylib + 33680) [0x192fa8390]
+                                            1  ??? (SignpostSupport + 23936) [0x22a890d80]
+                                              1  ??? (CoreFoundation + 73156) [0x1931a8dc4]
+                                                1  ??? (libobjc.A.dylib + 23532) [0x192fa5bec]
+                                                  1  ??? (libobjc.A.dylib + 15316) [0x192fa3bd4]
+                                                    1  ??? (libobjc.A.dylib + 33680) [0x192fa8390]
+                                                      1  ??? (SignpostSupport + 24112) [0x22a890e30]
+                                                        1  ??? (CoreFoundation + 74296) [0x1931a9238]
+                                                          1  ??? (CoreFoundation + 17256) [0x19319b368]
+                                                            1  ??? (CoreFoundation + 51272) [0x1931a3848]
+                                                              1  <on behalf of UNKNOWN [11776] (originated by UNKNOWN [11776])>
+
+  Binary Images:
+           0x10099c000 -                ???  signpost_reporter                 <1C21ECE3-43DE-3BA4-BE7A-69AC5F285A3D>  /usr/libexec/signpost_reporter
+           0x192fa0000 -        0x192fed927  libobjc.A.dylib                   <C2EF9155-FECE-3914-A152-1AFEA0CDD0D2>  /usr/lib/libobjc.A.dylib
+           0x1930d6000 -        0x1930e2247  libsystem_pthread.dylib           <C7B5BA78-8BA4-33E9-97E1-473A131DFBD6>  /usr/lib/system/libsystem_pthread.dylib
+           0x193197000 -        0x1936795f7  CoreFoundation                    <FDD0CBDC-851F-3525-ACCD-F010D6988A70>  /System/Library/Frameworks/CoreFoundation.framework/CoreFoundation
+           0x19367a000 -        0x1947af833  Foundation                        <E1D9BBEF-1C75-34E6-9A07-0A9985BB16BB>  /System/Library/Frameworks/Foundation.framework/Foundation
+           0x1c1453000 -        0x1c1499cff  libdispatch.dylib                 <A40FC4F5-E6D1-3300-B71E-1CA6DE029277>  /usr/lib/system/libdispatch.dylib
+           0x1d4ee6000 -        0x1d4f59cc7  LoggingSupport                    <273EF55C-6348-3DF4-A409-C0AD1FFAC998>  /System/Library/PrivateFrameworks/LoggingSupport.framework/LoggingSupport
+           0x22a88b000 -        0x22a92f1c7  SignpostSupport                   <525F8C83-0CED-371B-9BBB-50756E0504B1>  /System/Library/PrivateFrameworks/SignpostSupport.framework/SignpostSupport
+           0x2b5a25000 -        0x2b5a2e6bf  SignpostCollection                <5E8CF735-56B6-3649-9B9A-753BE03173CE>  /System/Library/PrivateFrameworks/SignpostCollection.framework/SignpostCollection
+           0x2d3e6c000 -        0x2d3e6c9b3  liblog_signpost.description.dylib <A569E35F-31CD-33F9-BB59-F74CEFC1A6FD>  /usr/lib/log/liblog_signpost.description.dylib

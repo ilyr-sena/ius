@@ -1,0 +1,2 @@
+{"bug_type":"226","timestamp":"2026-09-02 17:16:19.00 -0400","os_version":"iPhone OS 27.0 (24A5418b)","roots_installed":0,"incident_id":"B24A7FA3-8680-4BDE-A204-E2E2B0779312"}
+{"postTime":1788383779678,"events":[{"build":"24A5418b","product":"iPhone OS","success_count":0,"eventLinkID":"5B718880-95CA-42C2-9ACC-A931F92854E9","eventType":"CloudServicesHealthSummary","soft_failure_count":0,"topic":"xp_coreos_securebackup","version":"27.0","modelid":"iPhone14,5","hard_failure_count":0}]}

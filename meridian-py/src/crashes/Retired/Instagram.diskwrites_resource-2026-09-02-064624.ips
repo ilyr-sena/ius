@@ -1,0 +1,346 @@
+{"roots_installed":0,"app_name":"Instagram","timestamp":"2026-09-02 06:46:24.00 -0400","app_version":"444.0.0","slice_uuid":"4C4C44AE-5555-3144-A12C-EA6364602EB8","adam_id":"389801252","build_version":"1047335181","bundleID":"com.burbn.instagram","duration_ms":"39776440","is_first_party":0,"share_with_app_devs":0,"bug_type":"145","os_version":"iPhone OS 27.0 (24A5418b)","distributor_id":"com.apple.AppStore","name":"Instagram","incident_id":"8A2C56DE-A59F-4EE8-AB1D-894509410A4A"}
+Date/Time:        2026-09-01 19:43:24.268 -0400
+End time:         2026-09-02 06:46:20.707 -0400
+OS Version:       iPhone OS 27.0 (Build 24A5418b)
+Architecture:     arm64e
+Report Version:   73
+Incident Identifier: 8A2C56DE-A59F-4EE8-AB1D-894509410A4A
+
+Data Source:      Microstackshots
+Shared Cache:     7CD05163-CF55-34F1-BB5F-6926BE60ED97 slid base address 0x192b9c000
+
+Command:          Instagram
+Path:             /private/var/containers/Bundle/Application/7A80EA65-E0BA-4F70-85F6-6AC242558913/Instagram.app/Instagram
+Identifier:       com.burbn.instagram
+Version:          444.0.0 (1047335181)
+Adam ID:          389801252
+Is First Party:   No
+Beta Identifier:  B8BF3913-3A1C-46AC-A05F-D91FC6CEF3F0
+Resource Coalition: 3364
+On Behalf Of:     7 samples UNKNOWN [37] (7 samples originated by UNKNOWN [37])
+Architecture:     arm64
+PID:              22356
+
+Event:            disk writes
+Action taken:     none
+Writes:           4295.06 MB of file backed memory dirtied over 39776 seconds (107.98 KB per second average), exceeding limit of 49.71 KB per second over 86400 seconds
+Writes limit:     4294.97 MB
+Limit duration:   86400s
+Writes caused:    4295.06 MB
+Writes duration:  39776s
+Duration:         39776.44s
+Duration Sampled: 2366.28s (event starts 37355.27s before samples, event ends 54.89s after samples)
+Steps:            36 (159 samples lost, 10.49 MB/step)
+
+Hardware model:   iPhone14,5
+Active cpus:      6
+Memory size:      3.58 GB
+HW page size:     16384
+VM page size:     16384
+
+Models:           UNKNOWN
+
+OS Cryptex File Extents: 19487
+
+Heaviest stack for the target process:
+  35  ??? (libsystem_pthread.dylib + 2320) [0x1930d6910]
+  34  ??? (libsystem_pthread.dylib + 4664) [0x1930d7238]
+  34  ??? (libdispatch.dylib + 87740) [0x1c14686bc]
+  34  ??? (libdispatch.dylib + 89240) [0x1c1468c98]
+  34  ??? (libdispatch.dylib + 46192) [0x1c145e470]
+  29  ??? (libdispatch.dylib + 43132) [0x1c145d87c]
+  29  ??? (libdispatch.dylib + 114624) [0x1c146efc0]
+  28  ??? (libdispatch.dylib + 7372) [0x1c1454ccc]
+  17  ??? (<4C4C447B-5555-3144-A1EA-03F1C30A2679> + 8593288) [0x119b7df88]
+  17  ??? (<4C4C447B-5555-3144-A1EA-03F1C30A2679> + 10682484) [0x119d7c074]
+  17  ??? (<4C4C447B-5555-3144-A1EA-03F1C30A2679> + 8593288) [0x119b7df88]
+  17  ??? (<4C4C447B-5555-3144-A1EA-03F1C30A2679> + 7601016) [0x119a8bb78]
+  17  ??? (<4C4C447B-5555-3144-A1EA-03F1C30A2679> + 7601616) [0x119a8bdd0]
+  17  ??? (<4C4C447B-5555-3144-A1EA-03F1C30A2679> + 7593288) [0x119a89d48]
+  17  ??? (<4C4C447B-5555-3144-A1EA-03F1C30A2679> + 7593376) [0x119a89da0]
+  17  ??? (<4C4C447B-5555-3144-A1EA-03F1C30A2679> + 7593532) [0x119a89e3c]
+  17  ??? (<4C4C447B-5555-3144-A1EA-03F1C30A2679> + 7601740) [0x119a8be4c]
+  17  ??? (CoreFoundation + 217280) [0x1931cc0c0]
+  17  ??? (CoreFoundation + 1093480) [0x1932a1f68]
+  17  ??? (libsystem_kernel.dylib + 20528) [0x24a840030]
+
+
+Powerstats for:   Instagram [22356]
+UUID:             4C4C44AE-5555-3144-A12C-EA6364602EB8
+Path:             /private/var/containers/Bundle/Application/7A80EA65-E0BA-4F70-85F6-6AC242558913/Instagram.app/Instagram
+Identifier:       com.burbn.instagram
+Version:          444.0.0 (1047335181)
+Adam ID:          389801252
+Is First Party:   No
+Beta Identifier:  B8BF3913-3A1C-46AC-A05F-D91FC6CEF3F0
+Resource Coalition: 36 samples 3364
+On Behalf Of:     7 samples UNKNOWN [37] (7 samples originated by UNKNOWN [37])
+Architecture:     arm64
+Footprint:        288.91 MB -> 536.67 MB (+247.77 MB)
+Pageins:          16804 pages
+Start time:       2026-09-02 06:05:59.534 -0400
+End time:         2026-09-02 06:45:25.813 -0400
+Num samples:      36 (100%)
+Energy:           46.12 mWh
+Num threads:      26
+Primary state:    13 samples Non-Frontmost App, Non-Suppressed, Kernel mode, Effective Thread QoS Background, Requested Thread QoS Default, Override Thread QoS Unspecified, e-core
+User Activity:    15 samples Idle, 21 samples Active
+Power Source:     0 samples on Battery, 36 samples on AC
+  35  ??? (libsystem_pthread.dylib + 2320) [0x1930d6910]
+    34  ??? (libsystem_pthread.dylib + 4664) [0x1930d7238]
+      34  ??? (libdispatch.dylib + 87740) [0x1c14686bc]
+        34  ??? (libdispatch.dylib + 89240) [0x1c1468c98]
+          34  ??? (libdispatch.dylib + 46192) [0x1c145e470]
+            29  ??? (libdispatch.dylib + 43132) [0x1c145d87c]
+              29  ??? (libdispatch.dylib + 114624) [0x1c146efc0]
+                28  ??? (libdispatch.dylib + 7372) [0x1c1454ccc]
+                  17  ??? (<4C4C447B-5555-3144-A1EA-03F1C30A2679> + 8593288) [0x119b7df88]
+                    17  ??? (<4C4C447B-5555-3144-A1EA-03F1C30A2679> + 10682484) [0x119d7c074]
+                      17  ??? (<4C4C447B-5555-3144-A1EA-03F1C30A2679> + 8593288) [0x119b7df88]
+                        17  ??? (<4C4C447B-5555-3144-A1EA-03F1C30A2679> + 7601016) [0x119a8bb78]
+                          17  ??? (<4C4C447B-5555-3144-A1EA-03F1C30A2679> + 7601616) [0x119a8bdd0]
+                            17  ??? (<4C4C447B-5555-3144-A1EA-03F1C30A2679> + 7593288) [0x119a89d48]
+                              17  ??? (<4C4C447B-5555-3144-A1EA-03F1C30A2679> + 7593376) [0x119a89da0]
+                                17  ??? (<4C4C447B-5555-3144-A1EA-03F1C30A2679> + 7593532) [0x119a89e3c]
+                                  17  ??? (<4C4C447B-5555-3144-A1EA-03F1C30A2679> + 7601740) [0x119a8be4c]
+                                    17  ??? (CoreFoundation + 217280) [0x1931cc0c0]
+                                      17  ??? (CoreFoundation + 1093480) [0x1932a1f68]
+                                        17  ??? (libsystem_kernel.dylib + 20528) [0x24a840030]
+                                          3   <Frontmost App, Effective Thread QoS Default, p-core>
+                                          1   <Effective Thread QoS Default, p-core>
+                  5   ??? (Instagram + 57819556) [0x107e3c1a4]
+                    5   ??? (Foundation + 550844) [0x1937007bc]
+                      5   ??? (Foundation + 578200) [0x193707298]
+                        5   ??? (Foundation + 565924) [0x1937042a4]
+                          5   ??? (libsystem_kernel.dylib + 20528) [0x24a840030]
+                            2   <Frontmost App, Effective Thread QoS Utility, Requested Thread QoS Utility>
+                            1   <on behalf of UNKNOWN [37] (originated by UNKNOWN [37]), Frontmost App, Effective Thread QoS Utility, Requested Thread QoS Utility, p-core>
+                            1   <Frontmost App, Effective Thread QoS Utility, Requested Thread QoS Utility, p-core>
+                            1   <on behalf of UNKNOWN [37] (originated by UNKNOWN [37]), Frontmost App, Effective Thread QoS Utility, Requested Thread QoS Utility>
+                  2   ??? (<4C4C447B-5555-3144-A1EA-03F1C30A2679> + 13016004) [0x119fb5bc4]
+                    1   ??? (<4C4C447B-5555-3144-A1EA-03F1C30A2679> + 23577328) [0x11a9c82f0]
+                      1   ??? (<4C4C447B-5555-3144-A1EA-03F1C30A2679> + 7576776) [0x119a85cc8]
+                        1   ??? (<4C4C447B-5555-3144-A1EA-03F1C30A2679> + 7581920) [0x119a870e0]
+                          1   ??? (CoreFoundation + 217280) [0x1931cc0c0]
+                            1   ??? (CoreFoundation + 1093480) [0x1932a1f68]
+                              1   ??? (libsystem_kernel.dylib + 20528) [0x24a840030]
+                                1   <Requested Thread QoS User Initiated>
+                    1   ??? (<4C4C447B-5555-3144-A1EA-03F1C30A2679> + 22947204) [0x11a92e584]
+                      1   ??? (<4C4C447B-5555-3144-A1EA-03F1C30A2679> + 7547880) [0x119a7ebe8]
+                        1   ??? (<4C4C447B-5555-3144-A1EA-03F1C30A2679> + 7415224) [0x119a5e5b8]
+                          1   ??? (Foundation + 550844) [0x1937007bc]
+                            1   ??? (Foundation + 578152) [0x193707268]
+                              1   ??? (Foundation + 2104076) [0x19387bb0c]
+                                1   ??? (libsystem_kernel.dylib + 20528) [0x24a840030]
+                                  1   <on behalf of UNKNOWN [37] (originated by UNKNOWN [37]), Effective Thread QoS Utility, Requested Thread QoS Utility>
+                  1   ??? (<4C4C447B-5555-3144-A1EA-03F1C30A2679> + 22921436) [0x11a9280dc]
+                    1   ??? (<4C4C447B-5555-3144-A1EA-03F1C30A2679> + 5779652) [0x1198cf0c4]
+                      1   ??? (<4C4C447B-5555-3144-A1EA-03F1C30A2679> + 13016004) [0x119fb5bc4]
+                        1   ??? (<4C4C447B-5555-3144-A1EA-03F1C30A2679> + 7548460) [0x119a7ee2c]
+                          1   ??? (<4C4C447B-5555-3144-A1EA-03F1C30A2679> + 7542916) [0x119a7d884]
+                            1   ??? (<4C4C447B-5555-3144-A1EA-03F1C30A2679> + 13017544) [0x119fb61c8]
+                              1   ??? (<4C4C447B-5555-3144-A1EA-03F1C30A2679> + 7549812) [0x119a7f374]
+                                1   ??? (CoreFoundation + 224064) [0x1931cdb40]
+                                  1   ??? (libsystem_kernel.dylib + 4832) [0x24a83c2e0]
+                                    1   <Frontmost App, Effective Thread QoS Default, p-core>
+                  1   ??? (Instagram + 140006480) [0x10cc9d450]
+                    1   ??? (Instagram + 41323784) [0x106e80d08]
+                      1   ??? (Instagram + 107105564) [0x10ad3cd1c]
+                        1   ??? (Instagram + 55519292) [0x107c0a83c]
+                          1   ??? (libdispatch.dylib + 74028) [0x1c146512c]
+                            1   ??? (libdispatch.dylib + 114624) [0x1c146efc0]
+                              1   ??? (Instagram + 55519416) [0x107c0a8b8]
+                                1   ??? (Instagram + 55520060) [0x107c0ab3c]
+                                  1   ??? (libsqlite3.dylib + 190996) [0x1b0da7a14]
+                                    1   ??? (libsqlite3.dylib + 333052) [0x1b0dca4fc]
+                                      1   ??? (libsqlite3.dylib + 571988) [0x1b0e04a54]
+                                        1   ??? (libsqlite3.dylib + 1233032) [0x1b0ea6088]
+                                          1   ??? (libsqlite3.dylib + 412336) [0x1b0dddab0]
+                                            1   ??? (libsqlite3.dylib + 332032) [0x1b0dca100]
+                                              1   ??? (libsystem_kernel.dylib + 27740) [0x24a841c5c]
+                                                1   <on behalf of UNKNOWN [37] (originated by UNKNOWN [37]), Frontmost App, Effective Thread QoS User Interactive, Requested Thread QoS User Interactive, p-core>
+                  1   ??? (Instagram + 64138596) [0x108442d64]
+                    1   ??? (Instagram + 53189072) [0x1079d19d0]
+                      1   ??? (<4C4C447B-5555-3144-A1EA-03F1C30A2679> + 4711936) [0x1197ca600]
+                        1   ??? (Instagram + 53177772) [0x1079cedac]
+                          1   ??? (Instagram + 53177728) [0x1079ced80]
+                            1   ??? (libsqlite3.dylib + 33000) [0x1b0d810e8]
+                              1   ??? (libsqlite3.dylib + 190232) [0x1b0da7718]
+                                1   ??? (libsqlite3.dylib + 235292) [0x1b0db271c]
+                                  1   ??? (libsqlite3.dylib + 93984) [0x1b0d8ff20]
+                                    1   ??? (libsqlite3.dylib + 261756) [0x1b0db8e7c]
+                                      1   ??? (libsqlite3.dylib + 262856) [0x1b0db92c8]
+                                        1   ??? (libsqlite3.dylib + 331128) [0x1b0dc9d78]
+                                          1   ??? (libsqlite3.dylib + 720320) [0x1b0e28dc0]
+                                            1   ??? (libsqlite3.dylib + 332032) [0x1b0dca100]
+                                              1   ??? (libsystem_kernel.dylib + 27740) [0x24a841c5c]
+                                                1   <on behalf of UNKNOWN [37] (originated by UNKNOWN [37]), Effective Thread QoS Default, p-core>
+                  1   ??? (Instagram + 57819204) [0x107e3c044]
+                    1   ??? (Instagram + 57820996) [0x107e3c744]
+                      1   ??? (Foundation + 2162668) [0x193889fec]
+                        1   ??? (Foundation + 4008320) [0x193a4c980]
+                          1   ??? (Foundation + 880752) [0x193751070]
+                            1   ??? (Foundation + 880956) [0x19375113c]
+                              1   ??? (libremovefile.dylib + 2744) [0x2d41d3ab8]
+                                1   ??? (libremovefile.dylib + 3760) [0x2d41d3eb0]
+                                  1   ??? (libsystem_kernel.dylib + 25796) [0x24a8414c4]
+                                    1   <Frontmost App, Effective Thread QoS Utility, Requested Thread QoS Utility>
+                1   ??? (<4C4C447B-5555-3144-A1EA-03F1C30A2679> + 8412788) [0x119b51e74]
+                  1   ??? (<4C4C447B-5555-3144-A1EA-03F1C30A2679> + 8402064) [0x119b4f490]
+                    1   ??? (<4C4C447B-5555-3144-A1EA-03F1C30A2679> + 8405792) [0x119b50320]
+                      1   ??? (<4C4C447B-5555-3144-A1EA-03F1C30A2679> + 8409080) [0x119b50ff8]
+                        1   ??? (<4C4C447B-5555-3144-A1EA-03F1C30A2679> + 8405036) [0x119b5002c]
+                          1   ??? (<4C4C447B-5555-3144-A1EA-03F1C30A2679> + 8411008) [0x119b51780]
+                            1   ??? (<4C4C447B-5555-3144-A1EA-03F1C30A2679> + 8419428) [0x119b53864]
+                              1   ??? (<4C4C447B-5555-3144-A1EA-03F1C30A2679> + 8397548) [0x119b4e2ec]
+                                1   ??? (<4C4C447B-5555-3144-A1EA-03F1C30A2679> + 4711936) [0x1197ca600]
+                                  1   ??? (Instagram + 57213164) [0x107da80ec]
+                                    1   ??? (<4C4C447B-5555-3144-A1EA-03F1C30A2679> + 8397760) [0x119b4e3c0]
+                                      1   ??? (libsqlite3.dylib + 33000) [0x1b0d810e8]
+                                        1   ??? (libsqlite3.dylib + 190232) [0x1b0da7718]
+                                          1   ??? (libsqlite3.dylib + 235232) [0x1b0db26e0]
+                                            1   ??? (libsqlite3.dylib + 93984) [0x1b0d8ff20]
+                                              1   ??? (libsqlite3.dylib + 261756) [0x1b0db8e7c]
+                                                1   ??? (libsqlite3.dylib + 262856) [0x1b0db92c8]
+                                                  1   ??? (libsqlite3.dylib + 331128) [0x1b0dc9d78]
+                                                    1   ??? (libsqlite3.dylib + 720320) [0x1b0e28dc0]
+                                                      1   ??? (libsqlite3.dylib + 332032) [0x1b0dca100]
+                                                        1   ??? (libsystem_kernel.dylib + 27740) [0x24a841c5c]
+                                                          1   <Frontmost App, Requested Thread QoS Background>
+            5   ??? (libdispatch.dylib + 42768) [0x1c145d710]
+              3   ??? (libdispatch.dylib + 46192) [0x1c145e470]
+                2   ??? (libdispatch.dylib + 42768) [0x1c145d710]
+                  2   ??? (libdispatch.dylib + 100992) [0x1c146ba80]
+                    2   ??? (libdispatch.dylib + 105404) [0x1c146cbbc]
+                      2   ??? (libdispatch.dylib + 26368) [0x1c1459700]
+                        2   ??? (libdispatch.dylib + 114624) [0x1c146efc0]
+                          2   ??? (<4C4C447B-5555-3144-A1EA-03F1C30A2679> + 3405420) [0x11968b66c]
+                            2   ??? (<4C4C447B-5555-3144-A1EA-03F1C30A2679> + 8433844) [0x119b570b4]
+                              1   ??? (<4C4C447B-5555-3144-A1EA-03F1C30A2679> + 19415864) [0x11a5d0338]
+                                1   ??? (<4C4C447B-5555-3144-A1EA-03F1C30A2679> + 5334816) [0x119862720]
+                                  1   ??? (<4C4C447B-5555-3144-A1EA-03F1C30A2679> + 5335780) [0x119862ae4]
+                                    1   ??? (<4C4C447B-5555-3144-A1EA-03F1C30A2679> + 5336276) [0x119862cd4]
+                                      1   ??? (<4C4C447B-5555-3144-A1EA-03F1C30A2679> + 3541464) [0x1196ac9d8]
+                                        1   ??? (<4C4C447B-5555-3144-A1EA-03F1C30A2679> + 3541824) [0x1196acb40]
+                                          1   ??? (libsqlite3.dylib + 34140) [0x1b0d8155c]
+                                            1   ??? (libsqlite3.dylib + 35080) [0x1b0d81908]
+                                              1   ??? (libsqlite3.dylib + 37372) [0x1b0d821fc]
+                                                1   ??? (libsqlite3.dylib + 48796) [0x1b0d84e9c]
+                                                  1   ??? (libsqlite3.dylib + 813024) [0x1b0e3f7e0]
+                                                    1   ??? (libsqlite3.dylib + 76268) [0x1b0d8b9ec]
+                                                      1   ??? (libsqlite3.dylib + 702988) [0x1b0e24a0c]
+                                                        1   ??? (libsqlite3.dylib + 95940) [0x1b0d906c4]
+                                                          1   ??? (libsqlite3.dylib + 100172) [0x1b0d9174c]
+                                                            1   ??? (libsqlite3.dylib + 102692) [0x1b0d92124]
+                                                              1   ??? (libsqlite3.dylib + 708800) [0x1b0e260c0]
+                                                                1   ??? (libsystem_kernel.dylib + 27740) [0x24a841c5c]
+                                                                  1   <Frontmost App, Effective Thread QoS Utility, Requested Thread QoS Utility>
+                              1   ??? (<4C4C447B-5555-3144-A1EA-03F1C30A2679> + 19414476) [0x11a5cfdcc]
+                                1   ??? (<4C4C447B-5555-3144-A1EA-03F1C30A2679> + 19585548) [0x11a5f9a0c]
+                                  1   ??? (<4C4C447B-5555-3144-A1EA-03F1C30A2679> + 17746484) [0x11a438a34]
+                                    1   ??? (<4C4C447B-5555-3144-A1EA-03F1C30A2679> + 12790124) [0x119f7e96c]
+                                      1   ??? (<4C4C447B-5555-3144-A1EA-03F1C30A2679> + 21769068) [0x11a80eb6c]
+                                        1   ??? (<4C4C447B-5555-3144-A1EA-03F1C30A2679> + 21768872) [0x11a80eaa8]
+                                          1   ??? (<4C4C447B-5555-3144-A1EA-03F1C30A2679> + 22238888) [0x11a8816a8]
+                                            1   ??? (<4C4C447B-5555-3144-A1EA-03F1C30A2679> + 6709300) [0x1199b2034]
+                                              1   ??? (<4C4C447B-5555-3144-A1EA-03F1C30A2679> + 5049504) [0x11981cca0]
+                                                1   ??? (<4C4C447B-5555-3144-A1EA-03F1C30A2679> + 5049604) [0x11981cd04]
+                                                  1   ??? (<4C4C447B-5555-3144-A1EA-03F1C30A2679> + 5049740) [0x11981cd8c]
+                                                    1   ??? (<4C4C447B-5555-3144-A1EA-03F1C30A2679> + 5050120) [0x11981cf08]
+                                                      1   ??? (<4C4C447B-5555-3144-A1EA-03F1C30A2679> + 5050264) [0x11981cf98]
+                                                        1   ??? (libsystem_kernel.dylib + 25796) [0x24a8414c4]
+                                                          1   <Frontmost App, Effective Thread QoS Utility, Requested Thread QoS Utility, p-core>
+                1   ??? (libdispatch.dylib + 43132) [0x1c145d87c]
+                  1   ??? (libdispatch.dylib + 114624) [0x1c146efc0]
+                    1   ??? (libdispatch.dylib + 7372) [0x1c1454ccc]
+                      1   ??? (<4C4C447B-5555-3144-A1EA-03F1C30A2679> + 7200072) [0x119a29d48]
+                        1   ??? (<4C4C447B-5555-3144-A1EA-03F1C30A2679> + 7201288) [0x119a2a208]
+                          1   ??? (<4C4C447B-5555-3144-A1EA-03F1C30A2679> + 7201880) [0x119a2a458]
+                            1   ??? (<4C4C447B-5555-3144-A1EA-03F1C30A2679> + 7201940) [0x119a2a494]
+                              1   ??? (<4C4C447B-5555-3144-A1EA-03F1C30A2679> + 7202096) [0x119a2a530]
+                                1   ??? (<4C4C447B-5555-3144-A1EA-03F1C30A2679> + 7202308) [0x119a2a604]
+                                  1   ??? (<4C4C447B-5555-3144-A1EA-03F1C30A2679> + 6169412) [0x11992e344]
+                                    1   ??? (<4C4C447B-5555-3144-A1EA-03F1C30A2679> + 6169888) [0x11992e520]
+                                      1   ??? (<4C4C447B-5555-3144-A1EA-03F1C30A2679> + 5961376) [0x1198fb6a0]
+                                        1   ??? (<4C4C447B-5555-3144-A1EA-03F1C30A2679> + 4711936) [0x1197ca600]
+                                          1   ??? (<4C4C447B-5555-3144-A1EA-03F1C30A2679> + 6170292) [0x11992e6b4]
+                                            1   ??? (<4C4C447B-5555-3144-A1EA-03F1C30A2679> + 5961656) [0x1198fb7b8]
+                                              1   ??? (<4C4C447B-5555-3144-A1EA-03F1C30A2679> + 6151700) [0x119929e14]
+                                                1   ??? (<4C4C447B-5555-3144-A1EA-03F1C30A2679> + 6150052) [0x1199297a4]
+                                                  1   ??? (<4C4C447B-5555-3144-A1EA-03F1C30A2679> + 6150644) [0x1199299f4]
+                                                    1   ??? (<4C4C447B-5555-3144-A1EA-03F1C30A2679> + 6124032) [0x119923200]
+                                                      1   ??? (libsystem_c.dylib + 55880) [0x19aaa2a48]
+                                                        1   ??? (libsystem_c.dylib + 18408) [0x19aa997e8]
+                                                          1   ??? (libsystem_c.dylib + 56084) [0x19aaa2b14]
+                                                            1   ??? (libsystem_kernel.dylib + 29624) [0x24a8423b8]
+                                                              1   <Frontmost App, Effective Thread QoS User Initiated>
+              2   ??? (libdispatch.dylib + 100992) [0x1c146ba80]
+                2   ??? (libdispatch.dylib + 105404) [0x1c146cbbc]
+                  2   ??? (libdispatch.dylib + 26368) [0x1c1459700]
+                    2   ??? (libdispatch.dylib + 114624) [0x1c146efc0]
+                      2   ??? (Instagram + 50894788) [0x1077a17c4]
+                        2   ??? (Instagram + 53507104) [0x107a1f420]
+                          2   ??? (Instagram + 53507224) [0x107a1f498]
+                            2   ??? (Instagram + 53500268) [0x107a1d96c]
+                              2   ??? (Foundation + 3616608) [0x1939ecf60]
+                                2   ??? (Foundation + 550844) [0x1937007bc]
+                                  2   ??? (Foundation + 578152) [0x193707268]
+                                    2   ??? (Foundation + 2104076) [0x19387bb0c]
+                                      2   ??? (libsystem_kernel.dylib + 33388) [0x24a84326c]
+                                        2   <Frontmost App, Requested Thread QoS Background>
+    1   ??? (libsystem_pthread.dylib + 4604) [0x1930d71fc]
+      1   ??? (libdispatch.dylib + 86256) [0x1c14680f0]
+        1   ??? (libdispatch.dylib + 84332) [0x1c146796c]
+          1   ??? (libdispatch.dylib + 114624) [0x1c146efc0]
+            1   ??? (libdispatch.dylib + 7372) [0x1c1454ccc]
+              1   ??? (Instagram + 54632552) [0x107b32068]
+                1   ??? (<4C4C447B-5555-3144-A1EA-03F1C30A2679> + 4711936) [0x1197ca600]
+                  1   ??? (Instagram + 54633236) [0x107b32314]
+                    1   ??? (Instagram + 54632960) [0x107b32200]
+                      1   ??? (Foundation + 550844) [0x1937007bc]
+                        1   ??? (Foundation + 578200) [0x193707298]
+                          1   ??? (Foundation + 565924) [0x1937042a4]
+                            1   ??? (libsystem_kernel.dylib + 20528) [0x24a840030]
+                              1   <on behalf of UNKNOWN [37] (originated by UNKNOWN [37]), Frontmost App, Requested Thread QoS Background>
+  1   ??? (libswift_Concurrency.dylib + 30860) [0x1947b788c]
+    1   ??? (Instagram + 179435744) [0x10f2378e0]
+      1   ??? (Instagram + 51323612) [0x10780a2dc]
+        1   ??? (Instagram + 179435740) [0x10f2378dc]
+          1   ??? (Instagram + 179435716) [0x10f2378c4]
+            1   ??? (Instagram + 55452164) [0x107bfa204]
+              1   ??? (Instagram + 55451320) [0x107bf9eb8]
+                1   ??? (Instagram + 179435820) [0x10f23792c]
+                  1   ??? (Instagram + 179422284) [0x10f23444c]
+                    1   ??? (Instagram + 179435804) [0x10f23791c]
+                      1   ??? (Instagram + 55433808) [0x107bf5a50]
+                        1   ??? (Instagram + 55698184) [0x107c36308]
+                          1   ??? (Instagram + 179372544) [0x10f228200]
+                            1   ??? (Instagram + 55650032) [0x107c2a6f0]
+                              1   ??? (Instagram + 55691280) [0x107c34810]
+                                1   ??? (Instagram + 55691484) [0x107c348dc]
+                                  1   ??? (Instagram + 55691584) [0x107c34940]
+                                    1   ??? (Instagram + 55650648) [0x107c2a958]
+                                      1   ??? (Instagram + 55481100) [0x107c0130c]
+                                        1   ??? (Instagram + 51468952) [0x10782da98]
+                                          1   ??? (libdispatch.dylib + 74028) [0x1c146512c]
+                                            1   ??? (libdispatch.dylib + 114624) [0x1c146efc0]
+                                              1   ??? (Instagram + 51059832) [0x1077c9c78]
+                                                1   ??? (libsqlite3.dylib + 190232) [0x1b0da7718]
+                                                  1   ??? (libsqlite3.dylib + 205452) [0x1b0dab28c]
+                                                    1   ??? (libsqlite3.dylib + 702988) [0x1b0e24a0c]
+                                                      1   ??? (libsqlite3.dylib + 95940) [0x1b0d906c4]
+                                                        1   ??? (libsqlite3.dylib + 99944) [0x1b0d91668]
+                                                          1   <on behalf of UNKNOWN [37] (originated by UNKNOWN [37]), Frontmost App, Effective Thread QoS User Initiated, Requested Thread QoS User Initiated, p-core>
+
+  Binary Images:
+           0x104718000 -                ???  com.burbn.instagram 444.0.0 (1047335181) <4C4C44AE-5555-3144-A12C-EA6364602EB8>  /private/var/containers/Bundle/Application/7A80EA65-E0BA-4F70-85F6-6AC242558913/Instagram.app/Instagram
+           0x11934c000 -                ???  ???                                      <4C4C447B-5555-3144-A1EA-03F1C30A2679>
+           0x1930d6000 -        0x1930e2247  libsystem_pthread.dylib                  <C7B5BA78-8BA4-33E9-97E1-473A131DFBD6>  /usr/lib/system/libsystem_pthread.dylib
+           0x193197000 -        0x1936795f7  CoreFoundation                           <FDD0CBDC-851F-3525-ACCD-F010D6988A70>  /System/Library/Frameworks/CoreFoundation.framework/CoreFoundation
+           0x19367a000 -        0x1947af833  Foundation                               <E1D9BBEF-1C75-34E6-9A07-0A9985BB16BB>  /System/Library/Frameworks/Foundation.framework/Foundation
+           0x1947b0000 -        0x19483c3b7  libswift_Concurrency.dylib               <85F0F8DB-BD5F-386C-91F7-09EEBD06E817>  /usr/lib/swift/libswift_Concurrency.dylib
+           0x19aa95000 -        0x19ab15ee3  libsystem_c.dylib                        <BA904479-CFFD-30F0-93DA-5D021DB1CD0C>  /usr/lib/system/libsystem_c.dylib
+           0x1b0d79000 -        0x1b0f315f7  libsqlite3.dylib                         <0A64725B-7A38-3B63-AA1C-64650E44F365>  /usr/lib/libsqlite3.dylib
+           0x1c1453000 -        0x1c1499cff  libdispatch.dylib                        <A40FC4F5-E6D1-3300-B71E-1CA6DE029277>  /usr/lib/system/libdispatch.dylib
+           0x24a83b000 -        0x24a87821b  libsystem_kernel.dylib                   <C162FB85-893C-3221-A115-FC59B6736B8D>  /usr/lib/system/libsystem_kernel.dylib
+           0x2d41d3000 -        0x2d41d58df  libremovefile.dylib                      <11E5262A-3DC7-38B8-88E5-81AFCA7F0FEA>  /usr/lib/system/libremovefile.dylib
