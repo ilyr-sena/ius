@@ -182,6 +182,9 @@ final class WebSocketConn {
         pump()
     }
 
+    /// True once `close()` has been called — callers should not enqueue more frames.
+    var isClosed: Bool { lock.lock(); defer { lock.unlock() }; return closed }
+
     func sendText(_ t: String) { enqueue(opcode: 0x1, payload: Data(t.utf8)) }
     func sendBinary(_ d: Data) { enqueue(opcode: 0x2, payload: d) }
 

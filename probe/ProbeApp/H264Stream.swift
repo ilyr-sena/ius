@@ -80,7 +80,7 @@ private enum MP4 {
             u32(1) + avc1Entry(avcC: avcC, width: width, height: height))
         let stbl = box("stbl",
             stsd
-            + fullbox("stts", 0, 0, u32(0))
+            + fullbox("stts", 0, 0, u32(0) + u32(0))
             + fullbox("stsc", 0, 0, u32(0))
             + fullbox("stsz", 0, 0, u32(0) + u32(0))
             + fullbox("stco", 0, 0, u32(0)))
@@ -419,6 +419,9 @@ final class H264Stream {
     }
 
     /// Full, safe teardown: complete outstanding encodes, invalidate, release.
+    /// `isTearingDown` is reset only after the async teardown finishes so no
+    /// new session can be created while VTCompressionSessionInvalidate is still
+    /// in flight on the background queue.
     private func teardownSession() {
         lock.lock()
         guard !isTearingDown, let s = session else { lock.unlock(); return }
@@ -426,13 +429,14 @@ final class H264Stream {
         isTearingDown = true
         lock.unlock()
 
-        // Complete pending frames off-thread so encode callbacks drain; then invalidate.
-        DispatchQueue(label: "ius.h264.teardown").async {
+        DispatchQueue(label: "ius.h264.teardown").async { [weak self] in
             VTCompressionSessionCompleteFrames(s, untilPresentationTimeStamp: .invalid)
             VTCompressionSessionInvalidate(s)
+            self?.lock.lock()
+            self?.isTearingDown = false
+            self?.lock.unlock()
+            print("[ius] h264 encoder invalidated")
         }
-        lock.lock(); isTearingDown = false; lock.unlock()
-        print("[ius] h264 encoder invalidated")
     }
 
     public func endSession() {
@@ -545,14 +549,22 @@ extension H264Stream {
             self?.remove(conn)
         }
         ws.onMessage = { [weak self] isText, data in
-            guard let self, isText,
-                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            guard let self, isText else { return }
+            // Best-effort JSON parse — do not crash on malformed data.
+            guard let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
             else { return }
             let op = obj["op"] as? String ?? ""
             if op == "tune" || op == "query" {
-                self.handleControl(obj, reply: ws)
+                // Defer off the WebSocket receive-loop so VT callbacks and
+                // enqueue/pump on the encoder pipeline cannot block each other.
+                DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                    guard let self else { return }
+                    // Bail if the connection was closed between receiving the
+                    // message and reaching this point.
+                    guard !ws.isClosed else { return }
+                    self.handleControl(obj, reply: ws)
+                }
             } else if obj["kind"] != nil {
-                // Forward control channel (gestures, taps, swipes) to WDA
                 let reply = WdaRelay.shared.handle(message: obj)
                 if let d = try? JSONSerialization.data(withJSONObject: reply) {
                     ws.enqueue(opcode: 0x1, payload: d)
@@ -734,7 +746,7 @@ extension H264Stream {
   const statLive = document.getElementById('statLive'), statMbps = document.getElementById('statMbps');
   const statFps = document.getElementById('statFps'), statLat = document.getElementById('statLat');
   const panel = document.getElementById('panel');
-  let ws, ms, sb, retryT, codec = 'avc1.640028';
+  let ws, ms, sb, retryT, codec = null;
   let pending = [], appending = false, started = false;
   let rxBytes = 0, rxStamp = performance.now(), fpsCount = 0, fpsStamp = performance.now();
 
@@ -775,7 +787,7 @@ extension H264Stream {
     const c = pending.shift();
     if (!c) return;
     appending = true;
-    try { sb.appendBuffer(c); } catch (e) {}
+    try { sb.appendBuffer(c); } catch (e) { toastMsg('append error: ' + e.message); }
     appending = false;
   }
 
