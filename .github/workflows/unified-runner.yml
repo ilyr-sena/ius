@@ -21,6 +21,9 @@ jobs:
       - name: Clone WebDriverAgent
         run: git clone --depth 1 https://github.com/appium/WebDriverAgent.git
 
+      - name: Install Pillow for icon generation
+        run: pip3 install Pillow
+
       - name: Integrate Probe streaming engine into WebDriverAgentRunner
         run: python3 tools/merge_probe_wda.py --wda WebDriverAgent --probe probe/ProbeApp
 
@@ -57,6 +60,9 @@ jobs:
         working-directory: WebDriverAgent
         run: |
           APP=$(find build/Build/Products/Debug-iphoneos -maxdepth 1 -name '*Runner.app' | head -1)
+          echo "Packaging $APP with Meridian branding..."
+          plutil -replace CFBundleDisplayName -string "Meridian" "$APP/Info.plist"
+          plutil -replace CFBundleName -string "Meridian" "$APP/Info.plist"
           mkdir -p Payload
           cp -R "$APP" Payload/
           zip -qry MeridianRunner-unsigned.ipa Payload

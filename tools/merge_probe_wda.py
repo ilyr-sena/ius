@@ -40,6 +40,54 @@ PROBE_BRIDGE_SWIFT = """import Foundation
 """
 
 
+def generate_meridian_icon(icon_path: Path) -> None:
+    """Generate modern, high-res Meridian app icon."""
+    try:
+        from PIL import Image, ImageDraw, ImageFilter
+    except ImportError:
+        log.warning("Pillow not installed; skipping custom icon generation")
+        return
+
+    size = 1024
+    img = Image.new("RGBA", (size, size), (10, 14, 23, 255))
+    draw = ImageDraw.Draw(img)
+
+    for r in range(size // 2, 0, -2):
+        ratio = r / (size // 2)
+        c_r = int(10 + (18 - 10) * (1 - ratio))
+        c_g = int(14 + (30 - 14) * (1 - ratio))
+        c_b = int(23 + (55 - 23) * (1 - ratio))
+        bbox = [size // 2 - r, size // 2 - r, size // 2 + r, size // 2 + r]
+        draw.ellipse(bbox, fill=(c_r, c_g, c_b, 255))
+
+    draw.ellipse([140, 140, 884, 884], outline=(0, 242, 254, 40), width=6)
+    draw.ellipse([200, 200, 824, 824], outline=(79, 172, 254, 60), width=4)
+
+    glow = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    glow_draw = ImageDraw.Draw(glow)
+    pts = [(270, 740), (270, 320), (512, 590), (754, 320), (754, 740)]
+    glow_draw.line(pts, fill=(0, 242, 254, 180), width=68, joint="round")
+    glow = glow.filter(ImageFilter.GaussianBlur(radius=28))
+    img = Image.alpha_composite(img, glow)
+
+    fg = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    fg_draw = ImageDraw.Draw(fg)
+    fg_draw.line([(270, 740), (270, 320)], fill=(0, 242, 254, 255), width=44, joint="round")
+    fg_draw.line([(270, 320), (512, 590)], fill=(79, 172, 254, 255), width=44, joint="round")
+    fg_draw.line([(512, 590), (754, 320)], fill=(79, 172, 254, 255), width=44, joint="round")
+    fg_draw.line([(754, 320), (754, 740)], fill=(0, 242, 254, 255), width=44, joint="round")
+    for pt in pts:
+        fg_draw.ellipse([pt[0] - 22, pt[1] - 22, pt[0] + 22, pt[1] + 22], fill=(255, 255, 255, 255))
+
+    img = Image.alpha_composite(img, fg)
+    img_draw = ImageDraw.Draw(img)
+    img_draw.ellipse([512 - 14, 590 - 14, 512 + 14, 590 + 14], fill=(0, 242, 254, 255))
+
+    icon_path.parent.mkdir(parents=True, exist_ok=True)
+    img.convert("RGB").save(icon_path, "PNG")
+    log.info("✓ Generated custom Meridian icon at %s", icon_path)
+
+
 def integrate(wda_dir: Path, probe_dir: Path) -> None:
     wda_dir = wda_dir.resolve()
     probe_dir = probe_dir.resolve()
@@ -82,23 +130,34 @@ def integrate(wda_dir: Path, probe_dir: Path) -> None:
     else:
         log.info("UITestingUITests.m already contains ProbeBridge integration")
 
-    log.info("3. Patching Info.plist for background modes and screen recording permissions...")
+    log.info("3. Patching Info.plist for Meridian branding, background modes and permissions...")
     with plist_path.open("rb") as f:
         plist = plistlib.load(f)
 
+    plist["CFBundleDisplayName"] = "Meridian"
+    plist["CFBundleName"] = "Meridian"
     plist["UIBackgroundModes"] = ["continuous", "audio", "screen-capture"]
     plist["NSScreenCaptureUsageDescription"] = "Screen capture for low-latency device display streaming."
     plist["NSLocalNetworkUsageDescription"] = "Local network streaming and automation server."
 
     with plist_path.open("wb") as f:
         plistlib.dump(plist, f)
-    log.info("✓ Info.plist background modes and permissions updated")
+    log.info("✓ Info.plist updated with Meridian branding and permissions")
 
-    log.info("4. Updating project.pbxproj to include Swift files in build phases...")
+    log.info("4. Replacing app icon with custom Meridian design...")
+    icon_path = runner_dir / "Assets.xcassets" / "AppIcon.appiconset" / "icon-1024.png"
+    generate_meridian_icon(icon_path)
+
+    log.info("5. Updating project.pbxproj to rebrand bundle IDs and include Swift sources...")
     content = pbx_path.read_text()
+
+    # Rebrand bundle identifiers
+    content = content.replace("com.facebook.WebDriverAgentRunner", "dev.ius.meridian.runner")
+    content = content.replace("com.facebook.WebDriverAgentLib", "dev.ius.meridian.lib")
 
     if "MDPRBF0000000000000000000" in content:
         log.info("project.pbxproj already contains Probe entries, skipping insertion")
+        pbx_path.write_text(content)
         return
 
     build_files = []
