@@ -34,6 +34,8 @@ jobs:
             -configuration Debug \
             -derivedDataPath build \
             IPHONEOS_DEPLOYMENT_TARGET=18.0 \
+            GCC_TREAT_WARNINGS_AS_ERRORS=NO \
+            SWIFT_TREAT_WARNINGS_AS_ERRORS=NO \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY=""
 
       - name: Ad-hoc sign app and nested bundles

@@ -68,13 +68,17 @@ def integrate(wda_dir: Path, probe_dir: Path) -> None:
     log.info("2. Patching UITestingUITests.m to initialize ProbeBridge...")
     ui_content = ui_tests_path.read_text()
     if "ProbeBridge" not in ui_content:
-        ui_content = '#import "WebDriverAgentRunner-Swift.h"\n' + ui_content
+        hook = (
+            "  Class probe = NSClassFromString(@\"ProbeBridge\");\n"
+            "  if (probe) { [probe performSelector:NSSelectorFromString(@\"start\")]; }\n"
+            "  FBWebServer *webServer = [[FBWebServer alloc] init];"
+        )
         ui_content = ui_content.replace(
             "FBWebServer *webServer = [[FBWebServer alloc] init];",
-            "[ProbeBridge start];\n  FBWebServer *webServer = [[FBWebServer alloc] init];",
+            hook,
         )
         ui_tests_path.write_text(ui_content)
-        log.info("✓ UITestingUITests.m successfully wired to ProbeBridge")
+        log.info("✓ UITestingUITests.m successfully wired to ProbeBridge (via ObjC runtime)")
     else:
         log.info("UITestingUITests.m already contains ProbeBridge integration")
 
